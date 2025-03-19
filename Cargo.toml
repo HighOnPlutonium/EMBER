@@ -6,6 +6,6 @@ edition = "2021"
 
 
 [dependencies]
-ash = { version = "0.38.0", features = ["loaded"] }
+ash = { version = "0.38.0", features = ["linked"] }
 winit = "0.30.9"
-
+ash-window = "0.13.0"
