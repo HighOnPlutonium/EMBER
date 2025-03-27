@@ -1,17 +1,26 @@
+mod util;
+
+use std::collections::HashMap;
+use util::per_window::PerWindow;
+
 use std::error::Error;
-use ash::Entry;
+use ash::{khr, Device, Entry};
 use ash::Instance;
+use ash::khr::swapchain;
 use ash::vk;
-use windows::Win32::Graphics::Dwm::DWM_BLURBEHIND;
+use ash::vk::{Extent2D, ImageAspectFlags, Rect2D};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
-use winit::window::{WindowAttributes, WindowId};
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use winit::window::WindowId;
+use crate::util::windows_ffi::WindowsFFI;
 
 const APPLICATION_TITLE: &str = "EMBER";
+const WINDOW_COUNT: usize = 1;
+
 fn main() {
     let event_loop = event_loop::EventLoop::new().unwrap();
     let mut app = App::new(&event_loop).unwrap();
@@ -22,12 +31,9 @@ struct App {
     entry: Entry,
     instance: Instance,
 
-    per_window: Option<PerWindow>
+    per_window: HashMap<WindowId,PerWindow>
 }
-struct PerWindow {
-    window: winit::window::Window,
-    surface: vk::SurfaceKHR,
-}
+
 
 impl App {
     /// Done here:
@@ -59,9 +65,7 @@ impl App {
         //INSTANCE CREATION
         let instance = unsafe { entry.create_instance(&create_info, None)? };
 
-
-
-        Ok(Self {entry, instance, per_window: None})
+        Ok(Self {entry, instance, per_window: HashMap::with_capacity(WINDOW_COUNT)})
     }
 }
 
@@ -77,74 +81,308 @@ impl ApplicationHandler for App {
     /// -
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 
-        let window = event_loop.create_window(
-            WindowAttributes::default()
-                .with_title(APPLICATION_TITLE)
-                .with_active(true)
-        ).unwrap();
+        let mut builder = util::per_window::WindowBuilder::new(event_loop, &self.entry, &self.instance);
+        builder.attributes = builder.attributes
+            .with_title(APPLICATION_TITLE)
+            .with_active(true)
+            .with_transparent(true);
 
-        let surface = unsafe {
-            ash_window::create_surface(
-            &self.entry, &self.instance,
-            window.display_handle()
-                .unwrap()
-                .as_raw(),
-            window.window_handle()
-                .unwrap()
-                .as_raw(),
-            None).unwrap()
-        };
+        (0..WINDOW_COUNT).for_each(|_|{ (|(x,y)|self.per_window.insert(x,y))(builder.build()); });
 
-        if let RawWindowHandle::Win32(mut handle) = window.window_handle().unwrap().as_raw() {
-            unsafe {
-                use windows::Win32::{Foundation::HWND};
-                let handle = std::mem::transmute::<_,HWND>(handle.hwnd);
-                #[repr(C)]
-                struct WindowCompositionAttribData {
-                    attrib: u32,
-                    pv_data: *mut core::ffi::c_void,
-                    cb_data: usize}
-                type SetWindowsCompositionAttribute = extern "system" fn(HWND, *mut WindowCompositionAttribData) -> windows::core::BOOL;
-                let lib = libloading::Library::new("C:/Windows/System32/user32.dll").unwrap();
-                let func: libloading::Symbol<SetWindowsCompositionAttribute> = lib.get(b"SetWindowCompositionAttribute").unwrap();
-                #[repr(C)]
-                struct Data {
-                    state: u32,
-                    flags: u32,
-                    gradient: u32,
-                    animation: u32}
-                let mut attribute = WindowCompositionAttribData {
-                    attrib: 19,
-                    pv_data: &Data { state: 3, flags: 480, gradient: 0, animation: 0 } as *const _ as _,
-                    cb_data: 16};
-                let success = func(handle, std::ptr::from_mut(&mut attribute));
-                println!("{}", success.as_bool());
-            }
+        unsafe {
+            let assorted_function_pointers = WindowsFFI::load_function_pointers();
+            self.per_window.iter().enumerate()
+                .for_each(|(idx,(_, &ref per_window))| {
+                    per_window.toggle_blur(&assorted_function_pointers);
+                    per_window.window.set_title(format!("{} - #{}", per_window.window.title(), idx + 1).as_ref());
+                });
         }
+        //don't click on this thingy here, thank you
+        {
+            self.per_window.iter()
+                .for_each(|(_, PerWindow { window, surface })| {
+                    unsafe {
+                        let pdevices = self.instance
+                            .enumerate_physical_devices()
+                            .expect("Physical device error");
+                        let surface_loader = khr::surface::Instance::new(&self.entry, &self.instance);
+                        let (pdevice, queue_family_index) = pdevices
+                            .iter()
+                            .find_map(|pdevice| {
+                                self.instance
+                                    .get_physical_device_queue_family_properties(*pdevice)
+                                    .iter()
+                                    .enumerate()
+                                    .find_map(|(index, info)| {
+                                        let supports_graphic_and_surface =
+                                            info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                                                && surface_loader
+                                                .get_physical_device_surface_support(
+                                                    *pdevice,
+                                                    index as u32,
+                                                    *surface,
+                                                )
+                                                .unwrap();
+                                        if supports_graphic_and_surface {
+                                            Some((*pdevice, index))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                            })
+                            .expect("Couldn't find suitable device.");
+                        let queue_family_index = queue_family_index as u32;
+                        let device_extension_names_raw = [
+                            swapchain::NAME.as_ptr(),
+                            #[cfg(any(target_os = "macos", target_os = "ios"))]
+                            ash::khr::portability_subset::NAME.as_ptr(),
+                        ];
+                        let features = vk::PhysicalDeviceFeatures {
+                            shader_clip_distance: 1,
+                            ..Default::default()
+                        };
+                        let priorities = [1.0];
 
+                        let queue_info = vk::DeviceQueueCreateInfo::default()
+                            .queue_family_index(queue_family_index)
+                            .queue_priorities(&priorities);
 
-        self.per_window = Some(PerWindow { window, surface });
+                        let device_create_info = vk::DeviceCreateInfo::default()
+                            .queue_create_infos(std::slice::from_ref(&queue_info))
+                            .enabled_extension_names(&device_extension_names_raw)
+                            .enabled_features(&features);
+
+                        let device: Device = self.instance
+                            .create_device(pdevice, &device_create_info, None)
+                            .unwrap();
+
+                        let present_queue = device.get_device_queue(queue_family_index, 0);
+
+                        let surface_format = surface_loader
+                            .get_physical_device_surface_formats(pdevice, *surface)
+                            .unwrap()[0];
+
+                        let surface_capabilities = surface_loader
+                            .get_physical_device_surface_capabilities(pdevice, *surface)
+                            .unwrap();
+                        let mut desired_image_count = surface_capabilities.min_image_count + 1;
+                        if surface_capabilities.max_image_count > 0
+                            && desired_image_count > surface_capabilities.max_image_count
+                        {
+                            desired_image_count = surface_capabilities.max_image_count;
+                        }
+                        let surface_resolution = match surface_capabilities.current_extent.width {
+                            u32::MAX => vk::Extent2D {
+                                width: window.inner_size().width,
+                                height: window.inner_size().height,
+                            },
+                            _ => surface_capabilities.current_extent,
+                        };
+                        let pre_transform = if surface_capabilities
+                            .supported_transforms
+                            .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+                        {
+                            vk::SurfaceTransformFlagsKHR::IDENTITY
+                        } else {
+                            surface_capabilities.current_transform
+                        };
+                        let present_modes = surface_loader
+                            .get_physical_device_surface_present_modes(pdevice, *surface)
+                            .unwrap();
+                        let present_mode = present_modes
+                            .iter()
+                            .cloned()
+                            .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
+                            .unwrap_or(vk::PresentModeKHR::FIFO);
+                        let swapchain_loader = swapchain::Device::new(&self.instance, &device);
+
+                        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+                            .surface(*surface)
+                            .min_image_count(desired_image_count)
+                            .image_color_space(surface_format.color_space)
+                            .image_format(surface_format.format)
+                            .image_extent(surface_resolution)
+                            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+                            .pre_transform(pre_transform)
+                            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                            .present_mode(present_mode)
+                            .clipped(true)
+                            .image_array_layers(1);
+
+                        let swapchain = swapchain_loader
+                            .create_swapchain(&swapchain_create_info, None)
+                            .unwrap();
+
+                        let pool_create_info = vk::CommandPoolCreateInfo::default()
+                            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                            .queue_family_index(queue_family_index);
+
+                        let pool = device.create_command_pool(&pool_create_info, None).unwrap();
+
+                        let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+                            .command_buffer_count(1)
+                            .command_pool(pool)
+                            .level(vk::CommandBufferLevel::PRIMARY);
+
+                        let command_buffers = device
+                            .allocate_command_buffers(&command_buffer_allocate_info)
+                            .unwrap();
+                        let setup_command_buffer = command_buffers[0];
+
+                        let present_images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
+                        let present_image_views: Vec<vk::ImageView> = present_images
+                            .iter()
+                            .map(|&image| {
+                                let create_view_info = vk::ImageViewCreateInfo::default()
+                                    .view_type(vk::ImageViewType::TYPE_2D)
+                                    .format(surface_format.format)
+                                    .components(vk::ComponentMapping {
+                                        r: vk::ComponentSwizzle::R,
+                                        g: vk::ComponentSwizzle::G,
+                                        b: vk::ComponentSwizzle::B,
+                                        a: vk::ComponentSwizzle::A,
+                                    })
+                                    .subresource_range(vk::ImageSubresourceRange {
+                                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                                        base_mip_level: 0,
+                                        level_count: 1,
+                                        base_array_layer: 0,
+                                        layer_count: 1,
+                                    })
+                                    .image(image);
+                                device.create_image_view(&create_view_info, None).unwrap()
+                            })
+                            .collect();
+
+                        let fence_create_info =
+                            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+                        let setup_commands_reuse_fence = device
+                            .create_fence(&fence_create_info, None)
+                            .expect("Create fence failed.");
+
+                        pub fn record_submit_commandbuffer<F: FnOnce(&Device, vk::CommandBuffer)>(
+                            device: &Device,
+                            command_buffer: vk::CommandBuffer,
+                            command_buffer_reuse_fence: vk::Fence,
+                            submit_queue: vk::Queue,
+                            wait_mask: &[vk::PipelineStageFlags],
+                            wait_semaphores: &[vk::Semaphore],
+                            signal_semaphores: &[vk::Semaphore],
+                            f: F,
+                        ) {
+                            unsafe {
+                                device
+                                    .wait_for_fences(&[command_buffer_reuse_fence], true, u64::MAX)
+                                    .expect("Wait for fence failed.");
+
+                                device
+                                    .reset_fences(&[command_buffer_reuse_fence])
+                                    .expect("Reset fences failed.");
+
+                                device
+                                    .reset_command_buffer(
+                                        command_buffer,
+                                        vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                                    )
+                                    .expect("Reset command buffer failed.");
+
+                                let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
+                                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+                                device
+                                    .begin_command_buffer(command_buffer, &command_buffer_begin_info)
+                                    .expect("Begin commandbuffer");
+                                f(device, command_buffer);
+                                device
+                                    .end_command_buffer(command_buffer)
+                                    .expect("End commandbuffer");
+
+                                let command_buffers = vec![command_buffer];
+
+                                let submit_info = vk::SubmitInfo::default()
+                                    .wait_semaphores(wait_semaphores)
+                                    .wait_dst_stage_mask(wait_mask)
+                                    .command_buffers(&command_buffers)
+                                    .signal_semaphores(signal_semaphores);
+
+                                device
+                                    .queue_submit(submit_queue, &[submit_info], command_buffer_reuse_fence)
+                                    .expect("queue submit failed.");
+                            }
+                        }
+                        record_submit_commandbuffer(
+                            &device,
+                            setup_command_buffer,
+                            setup_commands_reuse_fence,
+                            present_queue,
+                            &[],
+                            &[],
+                            &[],
+                            |device, setup_command_buffer| {
+                                let clearcolorvalue = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] };
+                                let range = vk::ImageSubresourceRange {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    base_mip_level: 0,
+                                    level_count: 1,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                };
+                                device.cmd_clear_color_image(setup_command_buffer, *present_images.get(0).unwrap(), vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, &clearcolorvalue, &[range]);
+
+                                device.cmd_pipeline_barrier(
+                                    setup_command_buffer,
+                                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                                    vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                                    vk::DependencyFlags::empty(),
+                                    &[],
+                                    &[],
+                                    &[],
+                                );
+
+                            },
+                        );
+                        let swapchains = &[swapchain];
+                        {
+                            let present_info = vk::PresentInfoKHR::default()
+                                .swapchains(swapchains)
+                                .image_indices(&[0]);
+
+                            swapchain_loader
+                                .queue_present(present_queue, &present_info)
+                                .unwrap();
+                        }
+                    };
+                });
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        let per_window = self.per_window.get(&window_id);
+        //early return, in case none of our windows match the window id of the current window event
+        if per_window.is_none() { return };
+        //we can safely pattern-match the unwrapped struct, because we already tested whether it has a value.
+        let PerWindow {window, surface} = per_window.unwrap();
         match event {
             WindowEvent::KeyboardInput { event, .. } =>
-                if let PhysicalKey::Code(keycode) = event.physical_key { match keycode {
-                    KeyCode::Escape => { self.window_event(event_loop, window_id, WindowEvent::CloseRequested) }
-                    _ => {}
-                }}
+                if let PhysicalKey::Code(keycode) = event.physical_key {
+                    match keycode {
+                        KeyCode::Escape => { self.window_event(event_loop, window_id, WindowEvent::CloseRequested) }
+                        _ => {}
+                    }
+            }
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                self.per_window.remove(&window_id);
+                if self.per_window.len() == 0 { event_loop.exit() };
             }
             WindowEvent::Resized(_) => {
-                self.per_window.as_ref().expect("window missing").window.request_redraw();
+                window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                if let Some(PerWindow {window, surface}) = self.per_window.as_ref() {
-                    //draw calls
-                    window.pre_present_notify();
-                    //swapchain submit
-                }
+                //draw calls
+                window.pre_present_notify();
+                //swapchain submit
             }
 
             _ => {}
@@ -152,6 +390,7 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, event_loop: &ActiveEventLoop, device_id: DeviceId, event: DeviceEvent) {
+        //dbg!(&event);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -161,8 +400,10 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        unsafe { self.instance.destroy_instance(None); }
     }
 
     fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+        println!("MEMORY WARNING");
     }
 }
