@@ -8,8 +8,8 @@
 //!
 //! [WINDOWCOMPOSITIONATTRIB enumeration](https://learn.microsoft.com/en-us/windows/win32/dwm/windowcompositionattrib)
 
-use std::os::raw::c_void;
 use libloading::Library;
+use std::os::raw::c_void;
 use winit::platform::windows::HWND;
 
 

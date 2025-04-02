@@ -1,10 +1,9 @@
-use std::num::NonZeroIsize;
+use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 use ash::{vk, Entry, Instance};
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 
 pub struct PerWindow {
     pub window: Window,
