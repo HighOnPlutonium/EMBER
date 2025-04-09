@@ -58,6 +58,7 @@ impl PerWindow {
                 ); //.then_some(()).expect("failure from function pointer call")
             }
             return
+
         };
         panic!("Severe lack of Win32 window handles");
     }

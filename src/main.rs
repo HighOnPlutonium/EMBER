@@ -7,13 +7,13 @@ use crate::util::per_window::WindowBuilder;
 use crate::util::windows_ffi::WindowsFFI;
 use ash::khr::swapchain;
 use ash::vk;
-use ash::vk::SurfaceKHR;
+use ash::vk::{LayerProperties, SurfaceKHR};
 use ash::Instance;
 use ash::{khr, Device, Entry};
 use std::error::Error;
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 use std::ops::Deref;
-use log::warn;
+use log::{debug, warn};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop;
@@ -70,20 +70,27 @@ impl App {
         let requested_layers = [
             c"LAYER_NAME",
         ];
-        let available_layers = unsafe { entry.enumerate_instance_layer_properties().unwrap() };
-        let layers = available_layers.iter().filter_map(|layer|{
-            requested_layers.iter()
-                .find(|&&requested| requested == layer.layer_name_as_c_str().unwrap() )
-                .and_then(|layer_name| return Some(layer_name.as_ptr()) );
-            None
+        let available_layers = unsafe { entry
+            .enumerate_instance_layer_properties()
+            .unwrap().into_iter()
+            .map(|layer|layer.layer_name_as_c_str().unwrap().to_owned())
+            .collect::<Vec<CString>>() };
+
+        let requested_layers = requested_layers.iter().filter_map(|&layer|{
+            if let Some(layer) = available_layers.iter().find(|&available|available == &layer.to_owned()) {
+                Some(layer.as_ptr())
+            } else {
+                warn!("VALIDATION LAYER {:?} NOT FOUND", layer);
+                None
+            }
         }).collect::<Vec<*const c_char>>();
 
         let create_info = vk::InstanceCreateInfo {
             p_application_info: &app_info,
             pp_enabled_extension_names: enabled_extensions.as_ptr(),
             enabled_extension_count: enabled_extensions.len() as _,
-            pp_enabled_layer_names: layers.as_ptr(),
-            enabled_layer_count: layers.len() as u32,
+            pp_enabled_layer_names: requested_layers.as_ptr(),
+            enabled_layer_count: requested_layers.len() as u32,
             ..Default::default()
         };
         //INSTANCE CREATION
@@ -148,7 +155,6 @@ impl ApplicationHandler for App {
                 //draw calls
                 window.pre_present_notify();
                 //swapchain submit
-                //self.we_dont_talk_about_this(window,surface);
 
             }
 
