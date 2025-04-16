@@ -5,6 +5,7 @@ use util::per_window::PerWindow;
 
 use crate::util::per_window::WindowBuilder;
 use crate::util::windows_ffi::WindowsFFI;
+use crate::util::logging::ConsoleLogger;
 use ash::khr::swapchain;
 use ash::vk;
 use ash::vk::{LayerProperties, SurfaceKHR};
@@ -13,7 +14,7 @@ use ash::{khr, Device, Entry};
 use std::error::Error;
 use std::ffi::{c_char, CStr, CString};
 use std::ops::Deref;
-use log::{debug, warn};
+use log::{debug, error, warn, LevelFilter};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop;
@@ -26,7 +27,11 @@ use winit::window::{Window, WindowId};
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 2;
 
+static LOGGER: ConsoleLogger = ConsoleLogger;
 fn main() {
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(LevelFilter::Trace);
+
     let event_loop = event_loop::EventLoop::new().unwrap();
     let mut app = App::new(&event_loop).unwrap();
     event_loop.run_app(&mut app).unwrap();
@@ -62,7 +67,11 @@ impl App {
         //let required_extension_names = &required_extensions.iter().map(|&x|unsafe{CStr::from_bytes_until_nul(x.cast::<[u8;256]>().as_ref().unwrap().as_slice()).unwrap()}).collect::<Vec<&CStr>>();
         //dbg!(required_extension_names);
 
-
+        println!("\n\n\n\n\n");
+        error!("test test test");
+        warn!("test test test");
+        debug!("test test test");
+        println!("\n\n\n\n\n");
         let enabled_extensions = required_extensions;
 
 
