@@ -10,5 +10,5 @@ ash = { version = "0.38.0", features = ["linked"] }
 winit = "0.30.9"
 ash-window = "0.13.0"
 libloading = "0.8.6"
-log = "0.4.27"
+log = { version = "0.4.27", features = ["std"] }
 colored = "3.0.0"

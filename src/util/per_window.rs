@@ -2,7 +2,7 @@ use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 use ash::{vk, Entry, Instance};
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::windows::HWND;
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+use winit::raw_window_handle::{HasDisplayHandle, HasRawDisplayHandle, HasRawWindowHandle, HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 pub struct PerWindow {
@@ -32,15 +32,8 @@ impl<'a> WindowBuilder<'a> {
         ).unwrap();
 
         let surface = unsafe {
-            ash_window::create_surface(
-                self.entry, self.instance,
-                window.display_handle()
-                    .unwrap()
-                    .as_raw(),
-                window.window_handle()
-                    .unwrap()
-                    .as_raw(),
-                None).expect("SURFACE CREATION ERROR")};
+            ash_window::create_surface(self.entry,self.instance,self.event_loop.raw_display_handle().unwrap(),window.raw_window_handle().unwrap(), None).unwrap()
+        };
 
         ( window.id(), PerWindow { window, surface } )
     }

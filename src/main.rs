@@ -1,5 +1,6 @@
 mod util;
 
+use std::any::type_name_of_val;
 use std::collections::HashMap;
 use util::per_window::PerWindow;
 
@@ -8,34 +9,104 @@ use crate::util::windows_ffi::WindowsFFI;
 use crate::util::logging::ConsoleLogger;
 use ash::khr::swapchain;
 use ash::vk;
-use ash::vk::{LayerProperties, SurfaceKHR};
 use ash::Instance;
 use ash::{khr, Device, Entry};
 use std::error::Error;
 use std::ffi::{c_char, CStr, CString};
+use std::hash::Hash;
 use std::ops::Deref;
-use log::{debug, error, warn, LevelFilter};
+use std::slice;
+use colored::Colorize;
+use log::{debug, error, info, warn, LevelFilter};
+
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::windows::WindowAttributesExtWindows;
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowId};
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 2;
 
+const VALIDATION_LAYERS: [&CStr;1] = [
+    c"VK_LAYER_KHRONOS_validation", ];
+const REQUIRED_EXTENSIONS: [&CStr; 1] = [
+    khr::surface::NAME ];
+const OPTIONAL_EXTENSIONS: [&CStr; 0] = [];
+
 static LOGGER: ConsoleLogger = ConsoleLogger;
-fn main() {
-    log::set_logger(&LOGGER).unwrap();
+fn main() -> Result<(),Box<dyn Error>> {
+    log::set_logger(&LOGGER)?;
     log::set_max_level(LevelFilter::Trace);
 
-    let event_loop = event_loop::EventLoop::new().unwrap();
-    let mut app = App::new(&event_loop).unwrap();
-    event_loop.run_app(&mut app).unwrap();
+    let event_loop = EventLoop::new()?;
+    let entry = Entry::linked();
+
+    let instance = {
+        let extensions: Vec<*const c_char> = {
+            let prerequisite: &CStr = {
+                #[cfg(target_os = "windows")]
+                { khr::win32_surface::NAME }
+                #[cfg(target_os = "linux")]
+                match event_loop.display_handle()?.as_raw() {
+                    RawDisplayHandle::Xlib(_) => khr::xlib_surface::NAME,
+                    RawDisplayHandle::Xcb(_) => khr::xcb_surface::NAME,
+                    RawDisplayHandle::Wayland(_) => khr::wayland_surface::NAME,
+                    tmp => { error!("Support for {} is unimplemented",format!("{:?}",tmp).bright_purple()); panic!() } }
+                #[cfg(target_os = "none")]
+                { error!("WHAT DO YOU MEAN THERE'S {}","NO TARGET OS".bright_purple()); panic!() }
+            };
+            let available: Vec<vk::ExtensionProperties> = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
+            let available: Vec<&CStr> = available.iter().map(|ext|ext.extension_name_as_c_str().unwrap()).collect();
+
+            let mut extensions: Vec<*const c_char> = Vec::with_capacity(1+REQUIRED_EXTENSIONS.len()+OPTIONAL_EXTENSIONS.len());
+            if available.contains(&prerequisite) { extensions.push(prerequisite.as_ptr()) }
+            else { error!("Prerequisite extension {} unavailable!", format!("{:?}",prerequisite).bright_purple()); panic!() }
+            for required in REQUIRED_EXTENSIONS { if available.contains(&required) { extensions.push(required.as_ptr()) }
+            else { error!("Required extension {} unavailable!", format!("{:?}",required).bright_purple()); panic!() } }
+            for optional in OPTIONAL_EXTENSIONS { if available.contains(&optional) { extensions.push(optional.as_ptr()) }
+            else { error!("Optional extension {} unavailable; Corresponding features {}",format!("{:?}",optional).bright_purple(),"locked".red()) } }
+            extensions
+        };
+        let layers = {
+            let available: Vec<vk::LayerProperties> = unsafe { entry.enumerate_instance_layer_properties()? };
+            let available: Vec<&CStr> = available.iter().map(|layer|layer.layer_name_as_c_str().unwrap()).collect();
+
+            VALIDATION_LAYERS.iter().filter_map(|layer| {
+                if available.contains(layer) { Some(layer.as_ptr()) }
+                else { warn!("Validation Layer {} is unavailable",format!("{:?}",layer).bright_purple()); None }
+            }).collect::<Vec<*const c_char>>()
+        };
+
+        let app_info = vk::ApplicationInfo {
+            p_application_name: APPLICATION_TITLE.as_ptr().cast(),
+            api_version: vk::make_api_version(0,1,0,0),
+            ..Default::default()};
+        let create_info = vk::InstanceCreateInfo {
+            p_application_info: &app_info,
+            pp_enabled_extension_names: extensions.as_ptr(),
+            enabled_extension_count: extensions.len() as u32,
+            pp_enabled_layer_names: layers.as_ptr(),
+            enabled_layer_count: layers.len() as u32,
+            ..Default::default()};
+
+        unsafe { entry.create_instance(&create_info, None)? }
+    };
+
+    match event_loop.run_app(&mut App {
+        entry, instance,
+        per_window: HashMap::with_capacity(WINDOW_COUNT),
+        windows_function_pointers: None, })
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(Box::new(e))
+    }
+
 }
+
 
 struct App {
     entry: Entry,
@@ -47,78 +118,11 @@ struct App {
 }
 
 
-impl App {
-    fn new(event_loop: &EventLoop<()>) -> Result<Self,Box<dyn Error>> {
-
-        //ENTRYPOINT LOADING
-        let entry = Entry::linked();
-        let app_info = vk::ApplicationInfo {
-            p_application_name: APPLICATION_TITLE.as_ptr().cast(),
-            //application_version: 0,
-            //p_engine_name: (),
-            //engine_version: 0,
-            api_version: vk::make_api_version(0,1,0,0),
-            ..Default::default()
-        };
-        let required_extensions = ash_window::enumerate_required_extensions(event_loop.display_handle()?.as_raw())?.to_vec();
-
-        //let available_extensions = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
-        //dbg!(&available_extensions);
-        //let required_extension_names = &required_extensions.iter().map(|&x|unsafe{CStr::from_bytes_until_nul(x.cast::<[u8;256]>().as_ref().unwrap().as_slice()).unwrap()}).collect::<Vec<&CStr>>();
-        //dbg!(required_extension_names);
-
-        println!("\n\n\n\n\n");
-        error!("test test test");
-        warn!("test test test");
-        debug!("test test test");
-        println!("\n\n\n\n\n");
-        let enabled_extensions = required_extensions;
-
-
-        //list wanted layers
-        let requested_layers = [
-            c"LAYER_NAME",
-        ];
-        let available_layers = unsafe { entry
-            .enumerate_instance_layer_properties()
-            .unwrap().into_iter()
-            .map(|layer|layer.layer_name_as_c_str().unwrap().to_owned())
-            .collect::<Vec<CString>>() };
-
-        let requested_layers = requested_layers.iter().filter_map(|&layer|{
-            if let Some(layer) = available_layers.iter().find(|&available|available == &layer.to_owned()) {
-                Some(layer.as_ptr())
-            } else {
-                warn!("VALIDATION LAYER {:?} NOT FOUND", layer);
-                None
-            }
-        }).collect::<Vec<*const c_char>>();
-
-        let create_info = vk::InstanceCreateInfo {
-            p_application_info: &app_info,
-            pp_enabled_extension_names: enabled_extensions.as_ptr(),
-            enabled_extension_count: enabled_extensions.len() as _,
-            pp_enabled_layer_names: requested_layers.as_ptr(),
-            enabled_layer_count: requested_layers.len() as u32,
-            ..Default::default()
-        };
-        //INSTANCE CREATION
-        let instance = unsafe { entry.create_instance(&create_info, None)? };
-
-
-
-
-
-        Ok(Self {entry, instance, per_window: HashMap::with_capacity(WINDOW_COUNT), windows_function_pointers: None})
-    }
-}
-
 
 #[allow(unused)]
 impl ApplicationHandler for App {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
     }
-
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 
@@ -128,15 +132,6 @@ impl ApplicationHandler for App {
             .with_active(true)
             .with_transparent(true);
 
-        (0..WINDOW_COUNT).for_each(|_|{ (|(x,y)|self.per_window.insert(x,y))(builder.build()); });
-        unsafe {
-            self.windows_function_pointers = Some(WindowsFFI::load_function_pointers());
-            self.per_window.iter().enumerate()
-                .for_each(|(idx,(_, &ref per_window))| {
-                    per_window.toggle_blur(&self.windows_function_pointers.as_ref().unwrap());
-                    per_window.window.set_title(format!("{} - #{}", per_window.window.title(), idx + 1).as_ref());
-                });
-        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
@@ -161,9 +156,7 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                //draw calls
                 window.pre_present_notify();
-                //swapchain submit
 
             }
 
@@ -182,7 +175,10 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        unsafe { self.instance.destroy_instance(None); }
+        info!("cleaning up...");
+        unsafe {
+            self.instance.destroy_instance(None);
+        }
     }
 
     fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
