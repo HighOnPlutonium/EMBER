@@ -4,11 +4,10 @@ use std::any::type_name_of_val;
 use std::collections::HashMap;
 use util::per_window::PerWindow;
 
-use crate::util::logging::ConsoleLogger;
+use crate::util::logging::{ConsoleLogger, Logged};
 use crate::util::per_window::WindowBuilder;
 use crate::util::windows_ffi::WindowsFFI;
-use ash::khr::swapchain;
-use ash::vk;
+use ash::{ext, vk};
 use ash::Instance;
 use ash::{khr, Device, Entry};
 use colored::Colorize;
@@ -18,8 +17,8 @@ use std::ffi::{c_char, CStr, CString};
 use std::hash::Hash;
 use std::ops::Deref;
 use std::process::exit;
-use std::{env, mem, slice};
-
+use std::{env, mem, ptr, slice};
+use ash::prelude::VkResult;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop;
@@ -37,7 +36,10 @@ const VALIDATION_LAYERS: [&CStr;1] = [
 ];
 const REQUIRED_EXTENSIONS: [&CStr; 1] = [
     khr::surface::NAME ];
-const OPTIONAL_EXTENSIONS: [&CStr; 0] = [];
+const OPTIONAL_EXTENSIONS: [&CStr; 1] = [
+    ext::debug_utils::NAME ];
+const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
+    khr::swapchain::NAME ];
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
 fn main() -> Result<(),Box<dyn Error>> {
@@ -52,6 +54,21 @@ fn main() -> Result<(),Box<dyn Error>> {
     let entry = Entry::linked();
 
 
+
+    let debug_utils_create_info = vk::DebugUtilsMessengerCreateInfoEXT {
+        message_severity: { type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
+            Flags::VERBOSE
+        },
+        message_type: { type Flags = vk::DebugUtilsMessageTypeFlagsEXT;
+            Flags::GENERAL | Flags::DEVICE_ADDRESS_BINDING | Flags::PERFORMANCE | Flags::VALIDATION
+        },
+        pfn_user_callback: Some(util::logging::debug_callback),
+        p_user_data: ptr::null_mut(),
+        ..Default::default()};
+
+
+
+    let mut opt_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     let instance = {
 
         let extensions: Vec<*const c_char> = {
@@ -73,7 +90,9 @@ fn main() -> Result<(),Box<dyn Error>> {
             for required in REQUIRED_EXTENSIONS { if available.contains(&required) { extensions.push(required.as_ptr()) }
             else { error!("Required extension {} unavailable!", format!("{:?}",required).bright_purple()); panic!() } }
             for optional in OPTIONAL_EXTENSIONS { if available.contains(&optional) { extensions.push(optional.as_ptr()) }
-            else { error!("Optional extension {} unavailable; Corresponding features {}",format!("{:?}",optional).bright_purple(),"locked".red()) } }
+            else {
+                opt_ext_lock.push(optional);
+                error!("Optional extension {} unavailable; Corresponding features {}",format!("{:?}",optional).bright_purple(),"locked".red()) } }
             extensions
         };
         let layers = {
@@ -92,6 +111,7 @@ fn main() -> Result<(),Box<dyn Error>> {
             api_version: vk::make_api_version(0,1,0,0),
             ..Default::default()};
         let create_info = vk::InstanceCreateInfo {
+            p_next: ptr::from_ref(&debug_utils_create_info).cast(),
             p_application_info: &app_info,
             pp_enabled_extension_names: extensions.as_ptr(),
             enabled_extension_count: extensions.len() as u32,
@@ -101,6 +121,7 @@ fn main() -> Result<(),Box<dyn Error>> {
 
         unsafe { entry.create_instance(&create_info, None)? }
     };
+
     let extension_holder = ExtensionHolder {
         surface: khr::surface::Instance::new(&entry,&instance),
         os_surface: match event_loop.display_handle()?.as_raw() {
@@ -110,10 +131,59 @@ fn main() -> Result<(),Box<dyn Error>> {
             RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&entry,&instance)),
             //unreachable because we already pattern-match the same arms in the "extensions"-block.
             _ => { unreachable!() }},
-
+        debug_utils: (!opt_ext_lock.contains(&ext::debug_utils::NAME)).then(||
+            ext::debug_utils::Instance::new(&entry,&instance)),
     };
+
+
+    let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
+    if let Some(debug_utils) = extension_holder.debug_utils.as_ref() {
+        debug_messenger = match unsafe { debug_utils.create_debug_utils_messenger(&debug_utils_create_info, None) } {
+            Ok(debug_messenger) => Some(debug_messenger),
+            Err(e) => { error!("Debug Messenger creation failed: {:?}; Execution will continue without it.",e); None }
+        }}
+
+
+    // todo!("check for presentation support")
+    // todo!("DEVICE EXTENSION CHECK")
+    let (phys_device,phys_device_properties,phys_device_features) = unsafe { instance
+        .enumerate_physical_devices()?
+        .iter().filter_map(|device|{
+            let properties = unsafe { instance.get_physical_device_properties(*device) };
+            let features   = unsafe { instance.get_physical_device_features(*device) };
+            Some((*device,properties,features))})
+        .min_by_key(|(_,properties,_)| { properties.device_type.as_raw() })
+        .unwrap_or_else(||
+            { error!("No suitable device found. Cannot continue without one.");
+            //unsafe { cleanup(&instance,&extension_holder,debug_messenger,) }; todo!("deal with emergency cleanup")
+            panic!() })};
+
+    // todo!("check for valid queue families during physical device selection")
+    // todo!("deal with presentation support and possible dedicated queues per task")
+    let queue_family_index =  unsafe {
+        let queue_families = instance.get_physical_device_queue_family_properties(phys_device);
+        queue_families.iter().enumerate().filter_map(|(usize,&properties)| {
+            properties.queue_flags.contains(vk::QueueFlags::GRAPHICS).then_some(usize)
+        }).next().unwrap()};
+
+    let device_queue_create_info = vk::DeviceQueueCreateInfo {
+        queue_family_index: queue_family_index as u32,
+        queue_count: 1,
+        p_queue_priorities: &1f32,
+        ..Default::default()};
+    let device_create_info = vk::DeviceCreateInfo {
+        queue_create_info_count: 1,
+        p_queue_create_infos: &device_queue_create_info,
+        //enabled_extension_count: 0,
+        //pp_enabled_extension_names: (),
+        p_enabled_features: &phys_device_features,
+        ..Default::default()};
+    let device = unsafe { instance.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
+    let queue = unsafe { device.get_device_queue(queue_family_index as u32, 0) };
+
+
     match event_loop.run_app(&mut App {
-        entry, instance,
+        entry, instance,debug_messenger,device,queue,
         windows: HashMap::with_capacity(WINDOW_COUNT),
         win32_function_pointers: None,
         ext: extension_holder,
@@ -130,6 +200,9 @@ fn main() -> Result<(),Box<dyn Error>> {
 pub(crate) struct App {
     entry: Entry,
     instance: Instance,
+    debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    device: Device,
+    queue: vk::Queue,
 
     windows: HashMap<WindowId,PerWindow>,
 
@@ -141,6 +214,7 @@ pub(crate) struct App {
 struct ExtensionHolder {
     surface: khr::surface::Instance,
     os_surface: OSSurface,
+    debug_utils: Option<ext::debug_utils::Instance>,
 }
 enum OSSurface {
     WINDOWS(khr::win32_surface::Instance),
@@ -150,7 +224,17 @@ enum OSSurface {
 }
 
 
-
+unsafe fn cleanup(
+    instance: &Instance, ext: &ExtensionHolder,
+    debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    device: &Device
+) {
+    if let (Some(debug_utils),Some(debug_messenger)) = (ext.debug_utils.as_ref(),debug_messenger) {
+        debug_utils.destroy_debug_utils_messenger(debug_messenger,None);
+    }
+    device.destroy_device(None);
+    instance.destroy_instance(None);
+}
 
 
 #[allow(unused)]
@@ -227,7 +311,7 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
         info!("Cleaning up...");
         unsafe {
-            self.instance.destroy_instance(None);
+            cleanup(&self.instance,&self.ext,self.debug_messenger,&self.device);
         }
 
     }

@@ -7,7 +7,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{ExtensionHolder, OSSurface};
+use crate::{cleanup, ExtensionHolder, OSSurface};
 use crate::util::logging::Logged;
 
 pub struct PerWindow {
@@ -74,7 +74,9 @@ impl<'a> WindowBuilder<'a> {
                     instance.create_xlib_surface(&create_info,None).logged("Surface creation failure")
                 }
                 //you'd have to actively try to get this error and even then, I doubt it's possible without manually fiddling with the applications' memory.
-                _ => { error!("Window Handle doesn't match display handles tolerated by this application"); panic!() }
+                _ => { error!("Window Handle doesn't match display handles tolerated by this application");
+                    //unsafe { cleanup() };  todo!
+                    panic!() }
             }
         };
 

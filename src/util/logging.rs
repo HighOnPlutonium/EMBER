@@ -1,9 +1,11 @@
 use std::any::Any;
+use std::ffi::CStr;
 use std::fmt::{format, Debug, Display};
 use std::vec::IntoIter;
+use ash::{vk, Instance};
 use colored::{Color, ColoredString, Colorize};
 
-use log::{error, Level, Log, Metadata, Record};
+use log::{error, info, trace, warn, Level, Log, Metadata, Record};
 
 pub struct ConsoleLogger;
 
@@ -25,7 +27,7 @@ impl Log for ConsoleLogger {
             ColoredString::from("]"),
             ColoredString::from("  "),
             ColoredString::from(":")];
-
+        if target.input == "VULKAN".to_owned() { flavor[2].input = " ".to_owned() }
         match record.level() {
             Level::Error => {
                 level.bgcolor  = Some(Color::TrueColor{r:165,g:0,b:0});
@@ -63,7 +65,17 @@ impl Log for ConsoleLogger {
                     flavor.fgcolor = Some(Color::BrightCyan);
                     flavor.bgcolor = level.bgcolor; });
             }
-            Level::Trace => {}
+            Level::Trace => {
+                level.bgcolor = Some(Color::TrueColor{r:65,g:65,b:65});
+                level.fgcolor = Some(Color::BrightWhite);
+                target.bgcolor = level.bgcolor;
+                target.fgcolor = Some(Color::BrightWhite);
+                flavor.iter_mut().for_each(|flavor| {
+                    flavor.fgcolor = Some(Color::TrueColor{r:205,g:205,b:205});
+                    flavor.bgcolor = level.bgcolor;
+                });
+
+            }
         }
         flavor[3].clear_bgcolor();
 
@@ -75,10 +87,36 @@ impl Log for ConsoleLogger {
     }
 }
 
+pub(crate) unsafe extern "system" fn  debug_callback(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    msg_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    user_data: *mut std::ffi::c_void)
+    -> vk::Bool32 {
+
+    let message = CStr::from_ptr((*callback_data).p_message).to_str().unwrap();
+
+    {   type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
+        match severity {
+            Flags::INFO => { info!("info") }
+            Flags::WARNING => { warn!("warning") }
+            Flags::ERROR => { error!("error") }
+            Flags::VERBOSE => { trace!(target:"VULKAN","{:?}: {}",msg_type,message) }
+            _ => { trace!("?") }
+    }}
+
+    false.into()
+}
+
+
+
+
+
 
 pub trait Logged<T> {
     fn logged(self, msg: &str) -> T;
 }
 impl<T,E:Display> Logged<T> for Result<T,E> {
+    // todo!("add cleanup calls")
     fn logged(self, msg: &str) -> T {  self.unwrap_or_else(|e| { error!("{}: {}",msg,e); panic!() }) }
 }
