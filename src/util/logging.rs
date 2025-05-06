@@ -86,7 +86,7 @@ impl Log for ConsoleLogger {
     fn flush(&self) {
     }
 }
-
+#[allow(unused)]
 pub(crate) unsafe extern "system" fn  debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     msg_type: vk::DebugUtilsMessageTypeFlagsEXT,

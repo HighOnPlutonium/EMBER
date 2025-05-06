@@ -28,6 +28,8 @@ use winit::platform::windows::WindowAttributesExtWindows;
 use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowId};
 
+
+
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
 
@@ -42,7 +44,9 @@ const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
     khr::swapchain::NAME ];
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
+
 fn main() -> Result<(),Box<dyn Error>> {
+
     ansi_term::enable_ansi_support().unwrap();
     unsafe { env::set_var("COLORTERM","truecolor"); }
 
@@ -54,7 +58,8 @@ fn main() -> Result<(),Box<dyn Error>> {
     let entry = Entry::linked();
 
 
-
+    //needs to be defined here already, cuz we need to pass a CreateInfo struct in instance creation, so that our debug messenger can hook into instance and device stuff
+    //doesn't NEED to be the same struct as the one we use to create the debug messenger, but it takes basically no effort to just reuse it instead.
     let debug_utils_create_info = vk::DebugUtilsMessengerCreateInfoEXT {
         message_severity: { type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
             Flags::VERBOSE
@@ -65,15 +70,12 @@ fn main() -> Result<(),Box<dyn Error>> {
         pfn_user_callback: Some(util::logging::debug_callback),
         p_user_data: ptr::null_mut(),
         ..Default::default()};
-
-
-
+    //OPTional_EXTension_LOCK - contains the names of optional extensions that ended up being unavailable, so that we can check for this once we try and load their function pointers
     let mut opt_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
+    //contains more than fits on the screen
     let instance = {
-
         let extensions: Vec<*const c_char> = {
             //(platform-dependent!) extension for surface creation.
-            //originally, only the linux specific things used pattern matching, and the decision between linux and windows was made using #[cfg(target_os = )]
             let prerequisite: &CStr = match event_loop.display_handle()?.as_raw() {
                     RawDisplayHandle::Windows(_) => khr::win32_surface::NAME,
                     RawDisplayHandle::Xlib(_) => khr::xlib_surface::NAME,
@@ -122,42 +124,22 @@ fn main() -> Result<(),Box<dyn Error>> {
         unsafe { entry.create_instance(&create_info, None)? }
     };
 
-    let extension_holder = ExtensionHolder {
-        surface: khr::surface::Instance::new(&entry,&instance),
-        os_surface: match event_loop.display_handle()?.as_raw() {
-            RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&entry,&instance)),
-            RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&entry,&instance)),
-            RawDisplayHandle::Xcb(_) => OSSurface::XCB(khr::xcb_surface::Instance::new(&entry,&instance)),
-            RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&entry,&instance)),
-            //unreachable because we already pattern-match the same arms in the "extensions"-block.
-            _ => { unreachable!() }},
-        debug_utils: (!opt_ext_lock.contains(&ext::debug_utils::NAME)).then(||
-            ext::debug_utils::Instance::new(&entry,&instance)),
-    };
-
-
-    let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
-    if let Some(debug_utils) = extension_holder.debug_utils.as_ref() {
-        debug_messenger = match unsafe { debug_utils.create_debug_utils_messenger(&debug_utils_create_info, None) } {
-            Ok(debug_messenger) => Some(debug_messenger),
-            Err(e) => { error!("Debug Messenger creation failed: {:?}; Execution will continue without it.",e); None }
-        }}
-
-
     // todo!("check for presentation support")
     // todo!("DEVICE EXTENSION CHECK")
-    let (phys_device,phys_device_properties,phys_device_features) = unsafe { instance
-        .enumerate_physical_devices()?
-        .iter().filter_map(|device|{
+    #[allow(unused)]
+    let (phys_device,phys_device_properties,phys_device_features) = unsafe {
+        instance.enumerate_physical_devices()?
+            .iter().filter_map(|device|{
             let properties = unsafe { instance.get_physical_device_properties(*device) };
             let features   = unsafe { instance.get_physical_device_features(*device) };
-            Some((*device,properties,features))})
-        .min_by_key(|(_,properties,_)| { properties.device_type.as_raw() })
-        .unwrap_or_else(||
-            { error!("No suitable device found. Cannot continue without one.");
-            //unsafe { cleanup(&instance,&extension_holder,debug_messenger,) }; todo!("deal with emergency cleanup")
-            panic!() })};
+            //REQUIRED_DEVICE_EXTENSIONS.iter().for_each(|ext|)
 
+            Some((*device,properties,features))})
+            .min_by_key(|(_,properties,_)| { properties.device_type.as_raw() })
+            .unwrap_or_else(||
+                { error!("No suitable device found. Cannot continue without one.");
+                    //unsafe { cleanup(&instance,&extension_holder,debug_messenger,) }; todo!("deal with emergency cleanup")
+                    panic!() })};
     // todo!("check for valid queue families during physical device selection")
     // todo!("deal with presentation support and possible dedicated queues per task")
     let queue_family_index =  unsafe {
@@ -165,7 +147,6 @@ fn main() -> Result<(),Box<dyn Error>> {
         queue_families.iter().enumerate().filter_map(|(usize,&properties)| {
             properties.queue_flags.contains(vk::QueueFlags::GRAPHICS).then_some(usize)
         }).next().unwrap()};
-
     let device_queue_create_info = vk::DeviceQueueCreateInfo {
         queue_family_index: queue_family_index as u32,
         queue_count: 1,
@@ -174,16 +155,43 @@ fn main() -> Result<(),Box<dyn Error>> {
     let device_create_info = vk::DeviceCreateInfo {
         queue_create_info_count: 1,
         p_queue_create_infos: &device_queue_create_info,
-        //enabled_extension_count: 0,
-        //pp_enabled_extension_names: (),
+        // todo! HARDCODED device extensions and no handling for missing swapchain support - ALTHOUGH, if there wasn't any, we'd intentionally panic!() with an error anyways.
+        enabled_extension_count: 1,
+        pp_enabled_extension_names: [khr::swapchain::NAME.as_ptr()].as_ptr(),
         p_enabled_features: &phys_device_features,
         ..Default::default()};
+
     let device = unsafe { instance.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
     let queue = unsafe { device.get_device_queue(queue_family_index as u32, 0) };
 
 
+    let extension_holder = ExtensionHolder {
+        surface: khr::surface::Instance::new(&entry,&instance),
+        os_surface: match event_loop.display_handle()?.as_raw() {
+            RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&entry,&instance)),
+            RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&entry,&instance)),
+            RawDisplayHandle::Xcb(_) => OSSurface::XCB(khr::xcb_surface::Instance::new(&entry,&instance)),
+            RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&entry,&instance)),
+            _ => { unreachable!() }},
+        debug_utils: (!opt_ext_lock.contains(&ext::debug_utils::NAME)).then(||
+            ext::debug_utils::Instance::new(&entry,&instance)),
+        swapchain: khr::swapchain::Device::new(&instance,&device),
+    };
+
+    //in case we either don't want a debug messenger or the related extension isn't available.
+    //otherwise we put the messenger this Option<> here
+    let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
+    if let Some(debug_utils) = extension_holder.debug_utils.as_ref() {
+        debug_messenger = match unsafe { debug_utils.create_debug_utils_messenger(&debug_utils_create_info, None) } {
+            Ok(debug_messenger) => Some(debug_messenger),
+            Err(e) => { error!("Debug Messenger creation failed: {:?}; Execution will continue without it.",e); None }
+        }}
+
+
+    //THIS IS THE LAST THING THAT ENDS UP RUNNING IN HERE - AFTER THIS, IT'S OFF TO THE WINDOW EVENT LOOP
+    //and once the event loop exits we also exit the actual application
     match event_loop.run_app(&mut App {
-        entry, instance,debug_messenger,device,queue,
+        entry, instance,debug_messenger,device,physical_device:phys_device,queue,
         windows: HashMap::with_capacity(WINDOW_COUNT),
         win32_function_pointers: None,
         ext: extension_holder,
@@ -192,7 +200,6 @@ fn main() -> Result<(),Box<dyn Error>> {
         Ok(_) => Ok(()),
         Err(e) => Err(Box::new(e))
     }
-
 }
 
 
@@ -202,6 +209,8 @@ pub(crate) struct App {
     instance: Instance,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     device: Device,
+    //i *think* there's no way to retrieve the physical device handle from a logical device
+    physical_device: vk::PhysicalDevice,
     queue: vk::Queue,
 
     windows: HashMap<WindowId,PerWindow>,
@@ -215,6 +224,8 @@ struct ExtensionHolder {
     surface: khr::surface::Instance,
     os_surface: OSSurface,
     debug_utils: Option<ext::debug_utils::Instance>,
+    // i guess i'll put device level functions into the same struct as instance level functions?
+    swapchain: khr::swapchain::Device,
 }
 enum OSSurface {
     WINDOWS(khr::win32_surface::Instance),
@@ -244,7 +255,7 @@ impl ApplicationHandler for App {
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 
-        let mut builder = WindowBuilder::new(&self.entry,&self.instance,&self.ext);
+        let mut builder = WindowBuilder::new(&self.entry,&self.instance,&self.ext,&self.device,&self.physical_device);
         builder.attributes = builder.attributes
             .with_title(APPLICATION_TITLE)
             .with_active(true)
@@ -263,7 +274,7 @@ impl ApplicationHandler for App {
         //early return, in case none of our windows match the window id of the current window event
         if per_window.is_none() { return };
         //we can safely pattern-match the unwrapped struct, because we already tested whether it has a value.
-        let PerWindow {window, surface} = per_window.unwrap();
+        let PerWindow {window, surface, swapchain, images, format, extent} = per_window.unwrap();
         match event {
             WindowEvent::KeyboardInput { event, .. } =>
                 if let PhysicalKey::Code(keycode) = event.physical_key {
@@ -282,8 +293,11 @@ impl ApplicationHandler for App {
                     format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple(),
                     "vk::SurfaceKHR".bright_purple());
 
-                let PerWindow { window: _, surface} = self.windows.remove(&window_id).unwrap();
-                unsafe { self.ext.surface.destroy_surface(surface,None); }
+                let PerWindow { window: _, surface, swapchain, images, format, extent} = self.windows.remove(&window_id).unwrap();
+                unsafe {
+                    self.ext.swapchain.destroy_swapchain(swapchain,None);
+                    self.ext.surface.destroy_surface(surface,None);
+                }
                 if self.windows.len() == 0 { event_loop.exit() };
             }
             WindowEvent::Resized(_) => {
