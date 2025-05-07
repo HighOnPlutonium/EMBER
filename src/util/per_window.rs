@@ -9,6 +9,7 @@ use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 use crate::{cleanup, ExtensionHolder, OSSurface};
+use crate::util::helpers::{create_framebuffer, create_graphics_pipeline, create_render_pass};
 use crate::util::logging::Logged;
 
 pub struct PerWindow {
@@ -16,8 +17,39 @@ pub struct PerWindow {
     pub surface: vk::SurfaceKHR,
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
+    pub views: Vec<vk::ImageView>,
+    pub framebuffers: Vec<vk::Framebuffer>,
     pub format: vk::Format,
     pub extent: vk::Extent2D,
+    pub render_pass: vk::RenderPass,
+    pub pipeline: vk::Pipeline,
+    pub layout: vk::PipelineLayout,
+    pub command_buffer: vk::CommandBuffer,
+    pub synchronization: SYN,
+}
+
+#[derive(Copy,Clone)]
+pub(crate) struct SYN {
+    pub(crate) swapchain: vk::Semaphore,
+    pub(crate) presentation: vk::Semaphore,
+    pub(crate) in_flight: vk::Fence,
+}
+impl SYN {
+    unsafe fn new(device: &Device) -> Result<SYN, Box<dyn Error>> {
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let fence_info = vk::FenceCreateInfo {
+            flags: vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()};
+        let swapchain    = device.create_semaphore(&semaphore_info,None)?;
+        let presentation = device.create_semaphore(&semaphore_info,None)?;
+        let in_flight    = device.create_fence(&fence_info,None)?;
+        Ok(Self {swapchain,presentation,in_flight})
+    }
+    pub(crate) unsafe fn destroy(self, device: &Device) {
+        device.destroy_semaphore(self.swapchain,None);
+        device.destroy_semaphore(self.presentation,None);
+        device.destroy_fence(self.in_flight,None);
+    }
 }
 
 pub struct WindowBuilder<'a> {
@@ -26,15 +58,16 @@ pub struct WindowBuilder<'a> {
     ext: &'a ExtensionHolder,
     device: &'a Device,
     physical_device: &'a vk::PhysicalDevice,
+    command_pool: &'a vk::CommandPool,
 
     pub attributes: WindowAttributes,
 }
 
 
 impl<'a> WindowBuilder<'a> {
-    pub fn new(entry: &'a Entry, instance: &'a Instance, ext: &'a ExtensionHolder, device: &'a Device, physical_device: &'a vk::PhysicalDevice) -> Self {
+    pub fn new(entry: &'a Entry, instance: &'a Instance, ext: &'a ExtensionHolder, device: &'a Device, physical_device: &'a vk::PhysicalDevice, command_pool: &'a vk::CommandPool) -> Self {
         WindowBuilder {
-            entry,instance, ext, device, physical_device,
+            entry,instance, ext, device, physical_device, command_pool,
             attributes: WindowAttributes::default()}
     }
     pub fn build(&self, event_loop: &'a ActiveEventLoop) -> (WindowId, PerWindow) {
@@ -125,7 +158,7 @@ impl<'a> WindowBuilder<'a> {
             //p_queue_family_indices: ,
             pre_transform: capabilities.current_transform,
             composite_alpha: vk::CompositeAlphaFlagsKHR::INHERIT,
-            present_mode: vk::PresentModeKHR::IMMEDIATE,
+            present_mode: vk::PresentModeKHR::FIFO,
             //we don't care about obscured pixels (for now)
             clipped: vk::TRUE,
             //really quite pleasant that the ash bindings implement Default for pretty much all those structs
@@ -138,8 +171,51 @@ impl<'a> WindowBuilder<'a> {
         /// just click then press F4:
         /// [ash::prelude::read_into_uninitialized_vector]
         let images = unsafe { self.ext.swapchain.get_swapchain_images(swapchain).unwrap() };
+        let mut views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
+        for image in &images {
+            let view_create_info = vk::ImageViewCreateInfo {
+                //flags: ,
+                image: *image,format,
+                view_type: vk::ImageViewType::TYPE_2D,
+                components: vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::IDENTITY,
+                    g: vk::ComponentSwizzle::IDENTITY,
+                    b: vk::ComponentSwizzle::IDENTITY,
+                    a: vk::ComponentSwizzle::IDENTITY},
+                subresource_range: vk::ImageSubresourceRange {
+                    //lot of interesting stuff regarding image aspect flags/masks - but nothing important for now.
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },..Default::default()};
+            views.push(unsafe { self.device.create_image_view(&view_create_info, None).unwrap() });
+        }
 
-        (window.id(), PerWindow { window, surface, swapchain, images, format, extent })
+        let render_pass = unsafe { create_render_pass(self.device,format) };
+        let (pipeline,layout) = unsafe { create_graphics_pipeline(self.device,extent,render_pass) };
+        let framebuffers: Vec<vk::Framebuffer> = views.iter().map(|&view| {
+            unsafe { create_framebuffer(self.device,view,render_pass,extent) }
+        }).collect();
+
+        let cmd_alloc_info = vk::CommandBufferAllocateInfo {
+            command_pool: *self.command_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count: 1,
+            ..Default::default()};
+        let command_buffer = unsafe { *(self.device.allocate_command_buffers(&cmd_alloc_info).unwrap().first().unwrap()) };
+
+
+        (window.id(), PerWindow { window, surface,
+            swapchain, images, views,
+            framebuffers,
+            format, extent,
+            render_pass,
+            pipeline, layout,
+            command_buffer,
+            synchronization: unsafe { SYN::new(self.device).unwrap() }, //missing synchronization object creation error handling...
+        })
     }
 }
 

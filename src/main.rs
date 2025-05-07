@@ -27,8 +27,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::windows::WindowAttributesExtWindows;
 use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowId};
-
-
+use crate::util::helpers::record_into_buffer;
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
@@ -142,13 +141,13 @@ fn main() -> Result<(),Box<dyn Error>> {
                     panic!() })};
     // todo!("check for valid queue families during physical device selection")
     // todo!("deal with presentation support and possible dedicated queues per task")
-    let queue_family_index =  unsafe {
+    let queue_family_index = unsafe {
         let queue_families = instance.get_physical_device_queue_family_properties(phys_device);
         queue_families.iter().enumerate().filter_map(|(usize,&properties)| {
             properties.queue_flags.contains(vk::QueueFlags::GRAPHICS).then_some(usize)
-        }).next().unwrap()};
+        }).next().unwrap()} as u32;
     let device_queue_create_info = vk::DeviceQueueCreateInfo {
-        queue_family_index: queue_family_index as u32,
+        queue_family_index,
         queue_count: 1,
         p_queue_priorities: &1f32,
         ..Default::default()};
@@ -162,7 +161,7 @@ fn main() -> Result<(),Box<dyn Error>> {
         ..Default::default()};
 
     let device = unsafe { instance.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
-    let queue = unsafe { device.get_device_queue(queue_family_index as u32, 0) };
+    let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
 
     let extension_holder = ExtensionHolder {
@@ -178,6 +177,17 @@ fn main() -> Result<(),Box<dyn Error>> {
         swapchain: khr::swapchain::Device::new(&instance,&device),
     };
 
+
+    let command_pool_info = vk::CommandPoolCreateInfo {
+        //declare that we want to reset singular/specific command buffers in the pool, instead of everything at once
+        flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+        queue_family_index,
+        ..Default::default()};
+    let command_pool = unsafe { device.create_command_pool(&command_pool_info,None).unwrap() };
+
+
+
+
     //in case we either don't want a debug messenger or the related extension isn't available.
     //otherwise we put the messenger this Option<> here
     let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
@@ -187,11 +197,13 @@ fn main() -> Result<(),Box<dyn Error>> {
             Err(e) => { error!("Debug Messenger creation failed: {:?}; Execution will continue without it.",e); None }
         }}
 
-
     //THIS IS THE LAST THING THAT ENDS UP RUNNING IN HERE - AFTER THIS, IT'S OFF TO THE WINDOW EVENT LOOP
     //and once the event loop exits we also exit the actual application
     match event_loop.run_app(&mut App {
-        entry, instance,debug_messenger,device,physical_device:phys_device,queue,
+        entry, instance,debug_messenger,device,
+        physical_device: phys_device,
+        queue,
+        command_pool,
         windows: HashMap::with_capacity(WINDOW_COUNT),
         win32_function_pointers: None,
         ext: extension_holder,
@@ -212,6 +224,8 @@ pub(crate) struct App {
     //i *think* there's no way to retrieve the physical device handle from a logical device
     physical_device: vk::PhysicalDevice,
     queue: vk::Queue,
+
+    command_pool: vk::CommandPool,
 
     windows: HashMap<WindowId,PerWindow>,
 
@@ -255,7 +269,7 @@ impl ApplicationHandler for App {
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 
-        let mut builder = WindowBuilder::new(&self.entry,&self.instance,&self.ext,&self.device,&self.physical_device);
+        let mut builder = WindowBuilder::new(&self.entry,&self.instance,&self.ext,&self.device,&self.physical_device,&self.command_pool);
         builder.attributes = builder.attributes
             .with_title(APPLICATION_TITLE)
             .with_active(true)
@@ -274,7 +288,7 @@ impl ApplicationHandler for App {
         //early return, in case none of our windows match the window id of the current window event
         if per_window.is_none() { return };
         //we can safely pattern-match the unwrapped struct, because we already tested whether it has a value.
-        let PerWindow {window, surface, swapchain, images, format, extent} = per_window.unwrap();
+        let PerWindow {window, surface, swapchain, images, views, framebuffers, format, extent, render_pass, pipeline, layout, command_buffer, synchronization: syn } = per_window.unwrap();
         match event {
             WindowEvent::KeyboardInput { event, .. } =>
                 if let PhysicalKey::Code(keycode) = event.physical_key {
@@ -289,12 +303,21 @@ impl ApplicationHandler for App {
                 //  issue is, if other systems get implemented that don't use a 64bit value as their window handle,
                 //  this would guarantee UB whenever a window gets closed
                 info!(
-                    "Closing Window with {} and destroying its {}",
-                    format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple(),
-                    "vk::SurfaceKHR".bright_purple());
+                    "Closing Window with {}",
+                    format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple());
 
-                let PerWindow { window: _, surface, swapchain, images, format, extent} = self.windows.remove(&window_id).unwrap();
+                let PerWindow {surface,layout,framebuffers,pipeline,render_pass,swapchain,views,synchronization, .. } = self.windows.remove(&window_id).unwrap();
                 unsafe {
+                    synchronization.destroy(&self.device);
+                    for framebuffer in framebuffers {
+                        self.device.destroy_framebuffer(framebuffer,None)}
+                    self.device.destroy_pipeline(pipeline,None);
+                    self.device.destroy_pipeline_layout(layout,None);
+                    self.device.destroy_render_pass(render_pass,None);
+                    for view in views {
+                        //do i need to destroy images myself? i dont know.
+                        //i do know i need to destroy image *views*.
+                        self.device.destroy_image_view(view,None)}
                     self.ext.swapchain.destroy_swapchain(swapchain,None);
                     self.ext.surface.destroy_surface(surface,None);
                 }
@@ -304,8 +327,48 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                //outline:
+                //  wait for previous frame
+                //  acquire swapchain image
+                //  record command buffer
+                //  window.pre_present_notify();  i think it should be here
+                //  submit command buffer
+                //  present swapchain image
+                let device = &self.device;
+                let ext = &self.ext;
+
+                unsafe { device.wait_for_fences(&[syn.in_flight],true,u64::MAX).unwrap() };
+                unsafe { device.reset_fences(&[syn.in_flight]).unwrap() };
+
+                let (next,suboptimal) = unsafe {
+                    ext.swapchain.acquire_next_image(*swapchain,u64::MAX,syn.swapchain,vk::Fence::null()).unwrap() };
+
+                unsafe { device.reset_command_buffer(*command_buffer,Default::default()).unwrap() };
+                unsafe { record_into_buffer(device,*pipeline,*render_pass,framebuffers[next as usize],*extent,*command_buffer,next) };
+
                 window.pre_present_notify();
 
+                let submit_info = vk::SubmitInfo {
+                    wait_semaphore_count: 1,
+                    p_wait_semaphores: ptr::from_ref(&syn.swapchain),
+                    p_wait_dst_stage_mask: ptr::from_ref(&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
+                    command_buffer_count: 1,
+                    p_command_buffers: ptr::from_ref(command_buffer),
+                    signal_semaphore_count: 1,
+                    p_signal_semaphores: ptr::from_ref(&syn.presentation),
+                    ..Default::default()};
+                unsafe { device.queue_submit(self.queue,&[submit_info], syn.in_flight).unwrap() };
+
+                let present_info = vk::PresentInfoKHR {
+                    wait_semaphore_count: 1,
+                    p_wait_semaphores: ptr::from_ref(&syn.presentation),
+                    swapchain_count: 1,
+                    p_swapchains: ptr::from_ref(swapchain),
+                    p_image_indices: ptr::from_ref(&next),
+                    p_results: ptr::null_mut(),
+                    ..Default::default()};
+
+                unsafe { ext.swapchain.queue_present(self.queue,&present_info).unwrap() };
             }
 
             _ => {}
@@ -325,6 +388,7 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
         info!("Cleaning up...");
         unsafe {
+            self.device.destroy_command_pool(self.command_pool,None);
             cleanup(&self.instance,&self.ext,self.debug_messenger,&self.device);
         }
 
