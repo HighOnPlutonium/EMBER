@@ -1,9 +1,12 @@
+use std::error::Error;
 use std::ptr;
-use ash::{vk, Device};
+use ash::{khr, vk, Device};
+use ash::vk::{Framebuffer, ImageView, RenderPass, SurfaceKHR, SwapchainKHR};
 use shaderc::CompilationArtifact;
+use winit::dpi::PhysicalSize;
+use winit::window::Window;
 
-//the only "Helper" function so far - at least there's a teensy tiny bit of future-proofing.
-//anyways, even this thing is really just the bare minimum
+//the bare minimum
 fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact {
 
     let compiler = shaderc::Compiler::new().unwrap();
@@ -14,6 +17,61 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
         source, kind,
         //those two strings are really just there for (possible) error messages. they don't need to be correct at all.
         "shader.glsl", "main", Some(&options)).unwrap()
+}
+
+pub(crate) unsafe fn create_swapchain(
+    window: &Window,
+    surface: vk::SurfaceKHR,
+    physical_device: vk::PhysicalDevice,
+    ext_surface: &khr::surface::Instance,
+    ext_swapchain: &khr::swapchain::Device
+) -> Result<(vk::SwapchainKHR,vk::Format,vk::Extent2D),Box<dyn Error>> { //currently we just propagate possible issues to the caller. which kinda sucks.
+    //if we want to do anything fun we'll need a swapchain - and that's a per-surface thingy
+    // todo! actually use all this information, and decide on proper swapchain settings based on them
+    let capabilities = ext_surface.get_physical_device_surface_capabilities(physical_device, surface)?;
+    let formats = ext_surface.get_physical_device_surface_formats(physical_device, surface)?;
+    #[allow(unused)]
+    let present_modes = ext_surface.get_physical_device_surface_present_modes(physical_device, surface)?;
+    #[allow(unused)]
+    let (formats, color_spaces) = formats.iter().map(|format| (format.format, format.color_space)).collect::<(Vec<vk::Format>, Vec<vk::ColorSpaceKHR>)>();
+
+    //in case neither 32bit BGRA SRGB or 32bit RGBA SRGB are available, a default value.
+    let mut format = *formats.first().unwrap();
+    //ain't fuckin with any of the other color spaces, nor dealing with their availability for now. honestly go find a device other than a washing mashien or something that deosn't support SRGB color spaces
+    let mut color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+    //SRGB is common and good. B8G8R8 format is also shockingly common in displays?
+    if formats.contains(&vk::Format::B8G8R8A8_SRGB) { format = vk::Format::B8G8R8A8_SRGB } else if formats.contains(&vk::Format::R8G8B8A8_SRGB) { format = vk::Format::R8G8B8A8_SRGB }
+
+    let extent = {
+        let PhysicalSize { width, height } = window.inner_size();
+        vk::Extent2D::default().width(width).height(height)
+    };
+
+    let swapchain_create_info = vk::SwapchainCreateInfoKHR {
+        flags: vk::SwapchainCreateFlagsKHR::default(),
+        surface,
+        min_image_count: capabilities.min_image_count,
+        image_format: format,
+        image_color_space: color_space,
+        image_extent: extent,
+        image_array_layers: 1,
+        //for now, we'll only use the swapchain as a framebuffer color attachment
+        image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        //exclusive sharing between queue families has the best performance, but forces you to deal with ownership in between families if you use multiple ones.
+        // we don't. we use one family without checking for presentation support. yay
+        image_sharing_mode: vk::SharingMode::EXCLUSIVE,
+        //          queue family infos are only needed if we're using CONCURRENT image sharing.
+        //queue_family_index_count: ,
+        //p_queue_family_indices: ,
+        pre_transform: capabilities.current_transform,
+        composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE, // todo!   INHERIT would be better but for some reason it's causing trouble on my PC (but not my laptop)
+        present_mode: vk::PresentModeKHR::FIFO,
+        //we don't care about obscured pixels (for now)
+        clipped: vk::TRUE,
+        //really quite pleasant that the ash bindings implement Default for pretty much all those structs
+        ..Default::default()};
+
+    Ok((ext_swapchain.create_swapchain(&swapchain_create_info, None)?, format,extent))
 }
 
 
@@ -119,14 +177,14 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
     let blending_attachment_info = vk::PipelineColorBlendAttachmentState {
         color_write_mask: vk::ColorComponentFlags::RGBA,
         blend_enable: vk::FALSE,
-        /*
-        src_color_blend_factor: ,
-        dst_color_blend_factor: ,
-        color_blend_op: ,
-        src_alpha_blend_factor: ,
-        dst_alpha_blend_factor: ,
-        alpha_blend_op: ,
-        */..Default::default()};
+/*
+        src_color_blend_factor: vk::BlendFactor::ONE,
+        dst_color_blend_factor: vk::BlendFactor::ONE,
+        color_blend_op: vk::BlendOp::ADD,
+        src_alpha_blend_factor: vk::BlendFactor::ONE,
+        dst_alpha_blend_factor: vk::BlendFactor::ONE,
+        alpha_blend_op: vk::BlendOp::MAX,*/
+        ..Default::default()};
     let blending_info = vk::PipelineColorBlendStateCreateInfo {
         //there's a funny bitflag for custom blending as specified in a fragment shader. not yet implemented in my code.
         logic_op_enable: vk::FALSE,
@@ -222,20 +280,25 @@ pub(crate) unsafe fn create_render_pass(device: &Device, format: vk::Format) -> 
     render_pass
 }
 
-pub(crate) unsafe fn create_framebuffer(device: &Device, view: vk::ImageView, render_pass: vk::RenderPass, extent: vk::Extent2D) -> vk::Framebuffer {
-    let framebuffer_info = vk::FramebufferCreateInfo {
-        //flags: vk::FramebufferCreateFlags::IMAGELESS    commented out because this might end up useful to me some day
-        render_pass,
-        attachment_count: 1,
-        p_attachments: ptr::from_ref(&view),
-        width: extent.width,
-        height: extent.height,
-        layers: 1,
-        ..Default::default()};
-    device.create_framebuffer(&framebuffer_info,None).unwrap()
+pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views: &Vec<ImageView>, render_pass: vk::RenderPass) -> Vec<vk::Framebuffer> {
+    let mut returnee: Vec<vk::Framebuffer> = Vec::with_capacity(views.len());
+    for view in views {
+        let framebuffer_info = vk::FramebufferCreateInfo {
+            //flags: vk::FramebufferCreateFlags::IMAGELESS    commented out because this might end up useful to me some day
+            render_pass,
+            attachment_count: 1,
+            p_attachments: ptr::from_ref(&view),
+            width: window.inner_size().width,
+            height: window.inner_size().height,
+            layers: 1,
+            ..Default::default()
+        };
+        returnee.push(device.create_framebuffer(&framebuffer_info,None).unwrap());  // todo!    ERROR HANDLING
+    }
+    returnee
 }
 
-pub(crate) unsafe fn record_into_buffer(device: &Device, pipeline: vk::Pipeline, render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D, command_buffer: vk::CommandBuffer, image_index: u32) {
+pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline, render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D, command_buffer: vk::CommandBuffer, _image_index: u32) {
     let begin_info = vk::CommandBufferBeginInfo {
         //flags: vk::CommandBufferUsageFlags,
         p_inheritance_info: ptr::null(),
@@ -259,8 +322,8 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, pipeline: vk::Pipeline,
     //because we set the viewport and scissor as dynamic state previously, we gotta set them again.
     let viewport = vk::Viewport {
         x: 0.0, y: 0.0,
-        width: extent.width as f32,
-        height: extent.height as f32,
+        width: window.inner_size().width as f32,
+        height: window.inner_size().height as f32,
         min_depth: 0.0,
         max_depth: 1.0};
     device.cmd_set_viewport(command_buffer,0,&[viewport]);
@@ -273,5 +336,74 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, pipeline: vk::Pipeline,
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();
+}
 
+
+pub(crate) unsafe fn recreate_swapchain(
+    device: &Device,
+    window: &Window,
+    surface: SurfaceKHR,
+    physical_device: vk::PhysicalDevice,
+    render_pass: RenderPass,
+
+    old_swapchain: SwapchainKHR,
+    old_views: Vec<ImageView>,
+    old_framebuffers: Vec<Framebuffer>,
+
+    ext_surface: &khr::surface::Instance,
+    ext_swapchain: &khr::swapchain::Device,
+) -> (vk::SwapchainKHR,Vec<vk::Image>,Vec<vk::ImageView>,Vec<vk::Framebuffer>,vk::Extent2D) {
+
+    device.device_wait_idle().unwrap(); // todo!
+
+    // todo!   PASS OLD SWAPCHAIN TO NEW SWAPCHAIN CREATION AND WAIT WITH SWAPCHAIN CLEANUP UNTIL THERE'S NO MORE FRAMES IN FLIGHT OF THE OLD ONE
+    swapchain_cleanup(device,ext_swapchain,old_swapchain,old_views,old_framebuffers);
+
+    let (swapchain,format,extent) = create_swapchain(&window, surface, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
+    let images = ext_swapchain.get_swapchain_images(swapchain).unwrap();    // todo!
+    let views = create_views(device,&images,format);
+    let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(device,window,&views,render_pass);
+
+    (swapchain,images,views,framebuffers,extent)
+}
+
+pub(crate) unsafe fn swapchain_cleanup(
+    device: &Device,
+    ext_swapchain: &khr::swapchain::Device,
+    swapchain: vk::SwapchainKHR,
+    views: Vec<vk::ImageView>,
+    framebuffers: Vec<vk::Framebuffer>
+) {
+    for framebuffer in framebuffers {
+        device.destroy_framebuffer(framebuffer,None);
+    }
+    for view in views {
+        device.destroy_image_view(view,None);
+    }
+    ext_swapchain.destroy_swapchain(swapchain,None);
+}
+
+pub(crate) unsafe fn create_views(device: &Device, images: &Vec<vk::Image>, format: vk::Format) -> Vec<vk::ImageView> {
+    let mut views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
+    for image in images {
+        let view_create_info = vk::ImageViewCreateInfo {
+            //flags: ,
+            image: *image,format,
+            view_type: vk::ImageViewType::TYPE_2D,
+            components: vk::ComponentMapping {
+                r: vk::ComponentSwizzle::IDENTITY,
+                g: vk::ComponentSwizzle::IDENTITY,
+                b: vk::ComponentSwizzle::IDENTITY,
+                a: vk::ComponentSwizzle::IDENTITY},
+            subresource_range: vk::ImageSubresourceRange {
+                //lot of interesting stuff regarding image aspect flags/masks - but nothing important for now.
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },..Default::default()};
+        views.push(device.create_image_view(&view_create_info, None).unwrap()); // todo!    ERROR HANDLING
+        }
+    views
 }

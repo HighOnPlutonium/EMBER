@@ -1,11 +1,12 @@
 use std::any::Any;
+use std::ffi;
 use std::ffi::CStr;
 use std::fmt::{format, Debug, Display};
 use std::vec::IntoIter;
 use ash::{vk, Instance};
 use colored::{Color, ColoredString, Colorize};
 
-use log::{error, info, trace, warn, Level, Log, Metadata, Record};
+use log::{debug, error, info, trace, warn, Level, Log, Metadata, Record};
 
 pub struct ConsoleLogger;
 
@@ -91,9 +92,8 @@ pub(crate) unsafe extern "system" fn  debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     msg_type: vk::DebugUtilsMessageTypeFlagsEXT,
     callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-    user_data: *mut std::ffi::c_void)
+    user_data: *mut ffi::c_void)
     -> vk::Bool32 {
-
     let message = CStr::from_ptr((*callback_data).p_message).to_str().unwrap();
 
     {   type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
@@ -108,7 +108,34 @@ pub(crate) unsafe extern "system" fn  debug_callback(
     false.into()
 }
 
+#[allow(unused)]
+pub(crate) unsafe extern "system" fn debug_reporter(
+    flags: vk::DebugReportFlagsEXT,
+    object_type: vk::DebugReportObjectTypeEXT,
+    object: u64,
+    location: usize,
+    message_code: i32,
+    layer_prefix: *const ffi::c_char,
+    message: *const ffi::c_char,
+    user_data: *mut ffi::c_void,
+) -> vk::Bool32 {
 
+    let message = CStr::from_ptr(message);
+
+    { type Flags = vk::DebugReportFlagsEXT;
+        match flags {
+            Flags::PERFORMANCE_WARNING => { warn!(target:"VULKAN","{:?}",message) }
+            Flags::WARNING => { warn!(target:"VULKAN","{:?}",message) }
+            Flags::DEBUG => { debug!(target:"VULKAN","{:?}",message) }
+            Flags::ERROR => { error!(target:"VULKAN","{:?}",message) }
+            Flags::INFORMATION => { info!(target:"VULKAN","{:?}",message) }
+            _ => { trace!(target:"VULKAN","??? {:?}",message) }
+        }
+
+    }
+
+    false.into()
+}
 
 
 

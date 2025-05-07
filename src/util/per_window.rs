@@ -2,14 +2,14 @@ use std::error::Error;
 use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 use ash::{khr, vk, Device, Entry, Instance};
 use colored::Colorize;
-use log::error;
+use log::{debug, error, info};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{cleanup, ExtensionHolder, OSSurface};
-use crate::util::helpers::{create_framebuffer, create_graphics_pipeline, create_render_pass};
+use crate::{cleanup, ExtensionHolder, OSSurface, MAX_FRAMES_IN_FLIGHT};
+use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_swapchain, create_views};
 use crate::util::logging::Logged;
 
 pub struct PerWindow {
@@ -24,8 +24,17 @@ pub struct PerWindow {
     pub render_pass: vk::RenderPass,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
-    pub command_buffer: vk::CommandBuffer,
-    pub synchronization: SYN,
+    pub command_buffers: Vec<vk::CommandBuffer>,
+    pub synchronization: Vec<SYN>,
+}
+
+impl PerWindow {
+    pub(crate) fn recreate(&mut self, swapchain: vk::SwapchainKHR, images: Vec<vk::Image>, views: Vec<vk::ImageView>, framebuffers: Vec<vk::Framebuffer>) {
+        self.swapchain = swapchain;
+        self.images = images;
+        self.views = views;
+        self.framebuffers = framebuffers;
+    }
 }
 
 #[derive(Copy,Clone)]
@@ -115,97 +124,31 @@ impl<'a> WindowBuilder<'a> {
                 }
                 //you'd have to actively try to get this error and even then, I doubt it's possible without manually fiddling with the applications' memory.
                 _ => { error!("Window Handle doesn't match display handles tolerated by this application");
-                    //unsafe { cleanup() };  todo!
+                    //unsafe { cleanup() };  todo!  CLEANUP IN CASE OF PANIC
                     panic!() }
             }
         };
 
-        //if we want to do anything fun we'll need a swapchain - and that's a per-surface thingy
-        // todo! actually use all this information, and decide on proper swapchain settings based on them
-        let capabilities = unsafe { self.ext.surface.get_physical_device_surface_capabilities(*self.physical_device, surface).unwrap() };
-        let formats = unsafe { self.ext.surface.get_physical_device_surface_formats(*self.physical_device, surface).unwrap() };
-        #[allow(unused)]
-        let present_modes = unsafe { self.ext.surface.get_physical_device_surface_present_modes(*self.physical_device, surface).unwrap() };
-        #[allow(unused)]
-        let (formats,color_spaces) = formats.iter().map(|format|(format.format,format.color_space)).collect::<(Vec<vk::Format>,Vec<vk::ColorSpaceKHR>)>();
 
-        //in case neither 32bit BGRA SRGB or 32bit RGBA SRGB are available, a default value.
-        let mut format = *formats.first().unwrap();
-        //ain't fuckin with any of the other color spaces, nor dealing with their availability for now. honestly go find a device other than a washing mashien or something that deosn't support SRGB color spaces
-        let mut color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
-        //SRGB is common and good. B8G8R8 format is also shockingly common in displays?
-        if formats.contains(&vk::Format::B8G8R8A8_SRGB) { format = vk::Format::B8G8R8A8_SRGB }
-        else if formats.contains(&vk::Format::R8G8B8A8_SRGB) { format = vk::Format::R8G8B8A8_SRGB }
-
-        let extent = {
-            let PhysicalSize { width, height } = window.inner_size();
-            vk::Extent2D::default().width(width).height(height) };
-
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR {
-            flags: vk::SwapchainCreateFlagsKHR::default(),
-            surface,
-            min_image_count: capabilities.min_image_count,
-            image_format: format,
-            image_color_space: color_space,
-            image_extent: extent,
-            image_array_layers: 1,
-            //for now, we'll only use the swapchain as a framebuffer color attachment
-            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            //exclusive sharing between queue families has the best performance, but forces you to deal with ownership in between families if you use multiple ones. we don't. we use one family without checking for presentation support. yay
-            image_sharing_mode: vk::SharingMode::EXCLUSIVE,
-            //          queue family infos are only needed if we're using CONCURRENT image sharing.
-            //queue_family_index_count: ,
-            //p_queue_family_indices: ,
-            pre_transform: capabilities.current_transform,
-            composite_alpha: vk::CompositeAlphaFlagsKHR::INHERIT,
-            present_mode: vk::PresentModeKHR::FIFO,
-            //we don't care about obscured pixels (for now)
-            clipped: vk::TRUE,
-            //really quite pleasant that the ash bindings implement Default for pretty much all those structs
-            ..Default::default()};
-
-        //error handling? who's that? whaddya the code started off with "good" error handling and went downhill?
-        let swapchain = unsafe { self.ext.swapchain.create_swapchain(&swapchain_create_info, None).unwrap() };
-        //oh and thanks to the ash devs, i don't need to query the amount of swapchain images to allocate space for before getting to fetch them.
-        //LOOK AT ash::prelude::read_into_uninitialized_vector() - genuinely a pleasant solution to all this
-        /// just click then press F4:
-        /// [ash::prelude::read_into_uninitialized_vector]
+        let (swapchain,format,extent) = unsafe {
+            create_swapchain(&window, surface, *self.physical_device, &self.ext.surface, &self.ext.swapchain).unwrap() };    // todo!    ERROR HANDLING
         let images = unsafe { self.ext.swapchain.get_swapchain_images(swapchain).unwrap() };
-        let mut views: Vec<vk::ImageView> = Vec::with_capacity(images.len());
-        for image in &images {
-            let view_create_info = vk::ImageViewCreateInfo {
-                //flags: ,
-                image: *image,format,
-                view_type: vk::ImageViewType::TYPE_2D,
-                components: vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::IDENTITY,
-                    g: vk::ComponentSwizzle::IDENTITY,
-                    b: vk::ComponentSwizzle::IDENTITY,
-                    a: vk::ComponentSwizzle::IDENTITY},
-                subresource_range: vk::ImageSubresourceRange {
-                    //lot of interesting stuff regarding image aspect flags/masks - but nothing important for now.
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },..Default::default()};
-            views.push(unsafe { self.device.create_image_view(&view_create_info, None).unwrap() });
-        }
+        let views = unsafe { create_views(self.device,&images,format) };
 
         let render_pass = unsafe { create_render_pass(self.device,format) };
         let (pipeline,layout) = unsafe { create_graphics_pipeline(self.device,extent,render_pass) };
-        let framebuffers: Vec<vk::Framebuffer> = views.iter().map(|&view| {
-            unsafe { create_framebuffer(self.device,view,render_pass,extent) }
-        }).collect();
+        let framebuffers: Vec<vk::Framebuffer> = unsafe { create_framebuffers(self.device,&window,&views,render_pass) };
 
         let cmd_alloc_info = vk::CommandBufferAllocateInfo {
             command_pool: *self.command_pool,
             level: vk::CommandBufferLevel::PRIMARY,
-            command_buffer_count: 1,
+            command_buffer_count: MAX_FRAMES_IN_FLIGHT,
             ..Default::default()};
-        let command_buffer = unsafe { *(self.device.allocate_command_buffers(&cmd_alloc_info).unwrap().first().unwrap()) };
+        let command_buffers = unsafe { self.device.allocate_command_buffers(&cmd_alloc_info).unwrap() };
 
+        let mut syn: Vec<SYN> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+        //missing synchronization object creation error handling...
+        (0..MAX_FRAMES_IN_FLIGHT).for_each(|_|unsafe { syn.push(SYN::new(self.device).unwrap()) });
 
         (window.id(), PerWindow { window, surface,
             swapchain, images, views,
@@ -213,8 +156,8 @@ impl<'a> WindowBuilder<'a> {
             format, extent,
             render_pass,
             pipeline, layout,
-            command_buffer,
-            synchronization: unsafe { SYN::new(self.device).unwrap() }, //missing synchronization object creation error handling...
+            command_buffers,
+            synchronization: syn,
         })
     }
 }
