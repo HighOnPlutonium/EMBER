@@ -18,6 +18,7 @@ use std::hash::Hash;
 use std::ops::Deref;
 use std::process::exit;
 use std::{env, mem, ptr, slice};
+use std::slice::Iter;
 use ash::prelude::VkResult;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
@@ -31,7 +32,7 @@ use winit::window::{Window, WindowId};
 use crate::util::helpers::{record_into_buffer, recreate_swapchain, swapchain_cleanup};
 
 const APPLICATION_TITLE: &str = "EMBER";
-const WINDOW_COUNT: usize = 6;
+const WINDOW_COUNT: usize = 5;
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
@@ -51,7 +52,11 @@ const OPTIONAL_EXTENSIONS: [&CStr; 2] = [
     ext::debug_report::NAME,
 ];
 const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
-    khr::swapchain::NAME ];
+    khr::swapchain::NAME,
+];
+const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 1] = [
+    ext::device_address_binding_report::NAME,
+];
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
 
@@ -66,6 +71,7 @@ fn main() -> Result<(),Box<dyn Error>> {
 
     let event_loop = EventLoop::new()?;
     let entry = Entry::linked();
+
 
     //needs to be defined here already, cuz we need to pass a CreateInfo struct in instance creation, so that our debug messenger can hook into instance and device stuff
     //doesn't NEED to be the same struct as the one we use to create the debug messenger, but it takes basically no effort to just reuse it instead.
@@ -125,7 +131,6 @@ fn main() -> Result<(),Box<dyn Error>> {
                 else { warn!("Validation Layer {} is unavailable",format!("{:?}",layer).bright_purple()); None }
             }).collect::<Vec<*const c_char>>()
         };
-
         let app_info = vk::ApplicationInfo {
             p_application_name: APPLICATION_TITLE.as_ptr().cast(),
             api_version: vk::make_api_version(0,1,0,0),
@@ -142,22 +147,56 @@ fn main() -> Result<(),Box<dyn Error>> {
         unsafe { entry.create_instance(&create_info, None)? }
     };
 
-    // todo!("check for presentation support")
-    // todo!("DEVICE EXTENSION CHECK")
-    #[allow(unused)]
-    let (phys_device,phys_device_properties,phys_device_features) = unsafe {
-        instance.enumerate_physical_devices()?
+    let mut opt_device_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
+    // todo!    MAKE THIS SECTION LESS FUCKING UGLY
+    let rated_devices: Vec<(u32,vk::PhysicalDevice,vk::PhysicalDeviceProperties,vk::PhysicalDeviceFeatures,Vec<*const c_char>)>
+            = unsafe { instance.enumerate_physical_devices()?
             .iter().filter_map(|device|{
-            let properties = unsafe { instance.get_physical_device_properties(*device) };
-            let features   = unsafe { instance.get_physical_device_features(*device) };
-            //REQUIRED_DEVICE_EXTENSIONS.iter().for_each(|ext|)
+            let mut rating = 0u32;
 
-            Some((*device,properties,features))})
-            .min_by_key(|(_,properties,_)| { properties.device_type.as_raw() })
-            .unwrap_or_else(||
-                { error!("No suitable device found. Cannot continue without one.");
-                    //unsafe { cleanup(&instance,&extension_holder,debug_messenger,) }; todo!("deal with emergency cleanup")
-                    panic!() })};
+            let properties = instance.get_physical_device_properties(*device);
+            let features   = instance.get_physical_device_features(*device);
+            let available_extensions: Vec<vk::ExtensionProperties> = instance.enumerate_device_extension_properties(*device).unwrap();
+            let available_extensions: Vec<&CStr> = available_extensions.iter().map(|properties|properties.extension_name_as_c_str().unwrap()).collect();
+            let mut extensions: Vec<*const c_char> = Vec::with_capacity(
+                REQUIRED_DEVICE_EXTENSIONS.len()+OPTIONAL_DEVICE_EXTENSIONS.len());
+            for ext in REQUIRED_DEVICE_EXTENSIONS {
+                if !available_extensions.contains(&ext) {
+                    warn!("Device {} is unsuitable because extension {} is missing.",
+                        format!("{:?}",properties.device_name_as_c_str().unwrap()).bright_purple(),
+                        format!("{:?}",ext).bright_purple());
+                    return None }
+                extensions.push(ext.as_ptr())}
+            for ext in OPTIONAL_DEVICE_EXTENSIONS {
+                if !available_extensions.contains(&ext) {
+                    warn!("Device {} doesn't support extension {}, rating adjusted accordingly.",
+                        format!("{:?}",properties.device_name_as_c_str().unwrap()).bright_purple(),
+                        format!("{:?}",ext).bright_purple());
+                    opt_device_ext_lock.push(ext);
+                    rating += 1 } else {
+                    extensions.push(ext.as_ptr())}}
+
+            Some((rating,*device,properties,features,extensions))}).collect()};
+    let device_opt = unsafe {
+        let mut best_rating = u32::MAX;
+        rated_devices.iter().for_each(|(rating,..)|{ best_rating = best_rating.min(*rating) });
+        let suitable_devices = rated_devices.iter().filter_map(|(rating,device,properties,features,extensions)|{
+            if *rating > best_rating { return None }
+            Some((device,properties,features,extensions)) });
+        suitable_devices.min_by_key(|(_,properties,_,_)|{
+            type Type = vk::PhysicalDeviceType;
+            match properties.device_type {
+                Type::DISCRETE_GPU => { 1 }
+                Type::INTEGRATED_GPU => { 2 }
+                Type::VIRTUAL_GPU => { 3 }
+                Type::CPU => { 4 }
+                _ => { 5 }
+            }})};
+
+    #[allow(unused)]
+    let Some((&phys_device,&phys_device_properties,&phys_device_features,phys_device_extensions)) = device_opt
+        else { error!("No suitable device found!"); panic!()  };
+
     // todo!("check for valid queue families during physical device selection")
     // todo!("deal with presentation support and possible dedicated queues per task")
     let queue_family_index = unsafe {
@@ -170,12 +209,21 @@ fn main() -> Result<(),Box<dyn Error>> {
         queue_count: 1,
         p_queue_priorities: &1f32,
         ..Default::default()};
+    let mut address_debug_info: Option<vk::PhysicalDeviceAddressBindingReportFeaturesEXT> = None;
+    if !opt_device_ext_lock.contains(&ext::device_address_binding_report::NAME) {
+        address_debug_info = Some(
+            vk::PhysicalDeviceAddressBindingReportFeaturesEXT {
+                report_address_binding: vk::TRUE,
+                ..Default::default()})};
+
     let device_create_info = vk::DeviceCreateInfo {
+        p_next: if let Some(address_debug_info) = address_debug_info {
+            ptr::from_ref(&address_debug_info).cast() } else { ptr::null() },
         queue_create_info_count: 1,
         p_queue_create_infos: &device_queue_create_info,
         // todo! HARDCODED device extensions and no handling for missing swapchain support - ALTHOUGH, if there wasn't any, we'd intentionally panic!() with an error anyways.
-        enabled_extension_count: 1,
-        pp_enabled_extension_names: [khr::swapchain::NAME.as_ptr()].as_ptr(),
+        enabled_extension_count: phys_device_extensions.len() as u32,
+        pp_enabled_extension_names: phys_device_extensions.as_ptr(),
         p_enabled_features: &phys_device_features,
         ..Default::default()};
 
@@ -198,16 +246,12 @@ fn main() -> Result<(),Box<dyn Error>> {
         swapchain: khr::swapchain::Device::new(&instance,&device),
     };
 
-
     let command_pool_info = vk::CommandPoolCreateInfo {
         //declare that we want to reset singular/specific command buffers in the pool, instead of everything at once
         flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
         queue_family_index,
         ..Default::default()};
     let command_pool = unsafe { device.create_command_pool(&command_pool_info,None).unwrap() };
-
-
-
 
     //in case we either don't want a debug messenger or the related extension isn't available.
     //otherwise we put the messenger this Option<> here
@@ -223,6 +267,10 @@ fn main() -> Result<(),Box<dyn Error>> {
             Ok(debug_reporter) => Some(debug_reporter),
             Err(e) => { error!("Debug Reporter creation failed: {:?}; Execution will continue without it.",e); None }
         }}
+
+
+    info!("Using Device {}",format!("{:?}",phys_device_properties.device_name_as_c_str().unwrap()).bright_purple());
+
 
     //THIS IS THE LAST THING THAT ENDS UP RUNNING IN HERE - AFTER THIS, IT'S OFF TO THE WINDOW EVENT LOOP
     //and once the event loop exits we also exit the actual application
@@ -315,7 +363,7 @@ impl ApplicationHandler for App {
         builder.attributes = builder.attributes
             .with_title(APPLICATION_TITLE)
             .with_active(true)
-            .with_transparent(true)
+            .with_transparent(false)
             .with_inner_size(Size::Logical(LogicalSize::new(400f64,400f64)));
 
         let mut window_count = WINDOW_COUNT;
@@ -326,7 +374,10 @@ impl ApplicationHandler for App {
         (0..window_count).for_each(|idx| {
             builder.attributes.title = format!("{}  #{}",APPLICATION_TITLE,idx+1);
             let (window_id,per_window) = builder.build(event_loop);
-            _ = self.windows.insert(window_id,per_window) });
+            let fp = unsafe { WindowsFFI::load_function_pointers() };
+            per_window.toggle_blur(&fp);
+            _ = self.windows.insert(window_id,per_window);
+        });
 
         // IF we create more than 5 windows. just for funsies + so that whoever's trying this out knows why there's so many windows being created
         if WINDOW_COUNT != window_count {
@@ -371,7 +422,7 @@ impl ApplicationHandler for App {
                 //this should also cause UB if you use any system with 32bit window handles/IDs.
                 //  issue is, if other systems get implemented that don't use a 64bit value as their window handle,
                 //  this would guarantee UB whenever a window gets closed
-                info!(
+                warn!(
                     "Closing Window with {}",
                     format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple());
 
@@ -380,14 +431,10 @@ impl ApplicationHandler for App {
                     //VERY IMPORTANT! otherwise, we'd try cleaning up semaphores n stuff while they're still in use
                     self.device.device_wait_idle().unwrap();
 
-                    for syn in synchronization {
-                        syn.destroy(&self.device);
-                    }
-
                     self.device.destroy_pipeline(pipeline,None);
                     self.device.destroy_pipeline_layout(layout,None);
 
-                    swapchain_cleanup(&self.device,&self.ext.swapchain,swapchain,views,framebuffers);
+                    swapchain_cleanup(&self.device,&self.ext.swapchain,swapchain,views,framebuffers,synchronization.clone());
 
                     self.device.destroy_render_pass(render_pass,None);
                     self.ext.surface.destroy_surface(surface,None);
@@ -409,7 +456,7 @@ impl ApplicationHandler for App {
                     match ext.swapchain.acquire_next_image(*swapchain, u64::MAX, syn[self.current_frame].swapchain.clone(), vk::Fence::null()) {
                         Ok((next,false)) => { next }
                         Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                            let (swapchain,images,views,framebuffers,_) = recreate_swapchain(
+                            let (swapchain,images,views,framebuffers,extent,syn) = recreate_swapchain(
                                 &self.device,
                                 window,
                                 *surface,
@@ -418,11 +465,12 @@ impl ApplicationHandler for App {
                                 *swapchain,
                                 views.clone(),
                                 framebuffers.clone(),
+                                syn.clone(),
                                 &self.ext.surface,
                                 &self.ext.swapchain
                             );
-                            per_window.recreate(swapchain,images,views,framebuffers);
-                            let PerWindow { synchronization: syn, .. } = per_window;
+                            per_window.recreate(swapchain,extent,images,views,framebuffers,syn.clone());
+
                             let (next,_) = ext.swapchain.acquire_next_image(swapchain, u64::MAX, syn[self.current_frame].swapchain, vk::Fence::null()).unwrap();
                             next
                         }
@@ -479,7 +527,7 @@ impl ApplicationHandler for App {
                     Ok(_) => {}
                     Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                         #[allow()]
-                        let (swapchain,images,views,framebuffers,_) = recreate_swapchain(
+                        let (swapchain,images,views,framebuffers,extent,syn) = recreate_swapchain(
                             &self.device,
                             window,
                             *surface,
@@ -488,10 +536,11 @@ impl ApplicationHandler for App {
                             *swapchain,
                             views.clone(),
                             framebuffers.clone(),
+                            syn.clone(),
                             &self.ext.surface,
                             &self.ext.swapchain
                         );
-                        per_window.recreate(swapchain,images,views,framebuffers);
+                        per_window.recreate(swapchain,extent,images,views,framebuffers,syn);
                     }
                     Err(e) => { error!("Swapchain recreation failed fatally: {:?}",e); panic!() }   // todo!    EMERGENCY CLEANUP
                 }};

@@ -29,11 +29,13 @@ pub struct PerWindow {
 }
 
 impl PerWindow {
-    pub(crate) fn recreate(&mut self, swapchain: vk::SwapchainKHR, images: Vec<vk::Image>, views: Vec<vk::ImageView>, framebuffers: Vec<vk::Framebuffer>) {
+    pub(crate) fn recreate(&mut self, swapchain: vk::SwapchainKHR, extent: vk::Extent2D, images: Vec<vk::Image>, views: Vec<vk::ImageView>, framebuffers: Vec<vk::Framebuffer>, syn: Vec<SYN>) {
         self.swapchain = swapchain;
+        self.extent = extent;
         self.images = images;
         self.views = views;
         self.framebuffers = framebuffers;
+        self.synchronization = syn;
     }
 }
 
@@ -44,7 +46,7 @@ pub(crate) struct SYN {
     pub(crate) in_flight: vk::Fence,
 }
 impl SYN {
-    unsafe fn new(device: &Device) -> Result<SYN, Box<dyn Error>> {
+    pub(crate) unsafe fn new(device: &Device) -> Result<SYN, Box<dyn Error>> {
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         let fence_info = vk::FenceCreateInfo {
             flags: vk::FenceCreateFlags::SIGNALED,
@@ -130,8 +132,8 @@ impl<'a> WindowBuilder<'a> {
         };
 
 
-        let (swapchain,format,extent) = unsafe {
-            create_swapchain(&window, surface, *self.physical_device, &self.ext.surface, &self.ext.swapchain).unwrap() };    // todo!    ERROR HANDLING
+        let (swapchain,format,extent,syn) = unsafe {
+            create_swapchain(&window, surface, self.device, *self.physical_device, &self.ext.surface, &self.ext.swapchain).unwrap() };    // todo!    ERROR HANDLING
         let images = unsafe { self.ext.swapchain.get_swapchain_images(swapchain).unwrap() };
         let views = unsafe { create_views(self.device,&images,format) };
 
@@ -146,9 +148,6 @@ impl<'a> WindowBuilder<'a> {
             ..Default::default()};
         let command_buffers = unsafe { self.device.allocate_command_buffers(&cmd_alloc_info).unwrap() };
 
-        let mut syn: Vec<SYN> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
-        //missing synchronization object creation error handling...
-        (0..MAX_FRAMES_IN_FLIGHT).for_each(|_|unsafe { syn.push(SYN::new(self.device).unwrap()) });
 
         (window.id(), PerWindow { window, surface,
             swapchain, images, views,

@@ -1,10 +1,11 @@
 use std::error::Error;
 use std::ptr;
 use ash::{khr, vk, Device};
-use ash::vk::{Framebuffer, ImageView, RenderPass, SurfaceKHR, SwapchainKHR};
 use shaderc::CompilationArtifact;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
+use crate::MAX_FRAMES_IN_FLIGHT;
+use crate::util::per_window::SYN;
 
 //the bare minimum
 fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact {
@@ -22,10 +23,11 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
 pub(crate) unsafe fn create_swapchain(
     window: &Window,
     surface: vk::SurfaceKHR,
+    device: &Device,
     physical_device: vk::PhysicalDevice,
     ext_surface: &khr::surface::Instance,
     ext_swapchain: &khr::swapchain::Device
-) -> Result<(vk::SwapchainKHR,vk::Format,vk::Extent2D),Box<dyn Error>> { //currently we just propagate possible issues to the caller. which kinda sucks.
+) -> Result<(vk::SwapchainKHR,vk::Format,vk::Extent2D,Vec<SYN>),Box<dyn Error>> { //currently we just propagate possible issues to the caller. which kinda sucks.
     //if we want to do anything fun we'll need a swapchain - and that's a per-surface thingy
     // todo! actually use all this information, and decide on proper swapchain settings based on them
     let capabilities = ext_surface.get_physical_device_surface_capabilities(physical_device, surface)?;
@@ -71,7 +73,11 @@ pub(crate) unsafe fn create_swapchain(
         //really quite pleasant that the ash bindings implement Default for pretty much all those structs
         ..Default::default()};
 
-    Ok((ext_swapchain.create_swapchain(&swapchain_create_info, None)?, format,extent))
+    let mut syn: Vec<SYN> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+    //missing synchronization object creation error handling...
+    (0..MAX_FRAMES_IN_FLIGHT).for_each(|_|unsafe { syn.push(SYN::new(device).unwrap()) });
+
+    Ok((ext_swapchain.create_swapchain(&swapchain_create_info, None)?, format,extent, syn))
 }
 
 
@@ -129,7 +135,7 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
 
     let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo {
         //index buffer info, effectively. nothing special needed for a singular tris.
-        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        topology: vk::PrimitiveTopology::TRIANGLE_STRIP,
         primitive_restart_enable: vk::FALSE,
         ..Default::default()};
 
@@ -280,7 +286,7 @@ pub(crate) unsafe fn create_render_pass(device: &Device, format: vk::Format) -> 
     render_pass
 }
 
-pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views: &Vec<ImageView>, render_pass: vk::RenderPass) -> Vec<vk::Framebuffer> {
+pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views: &Vec<vk::ImageView>, render_pass: vk::RenderPass) -> Vec<vk::Framebuffer> {
     let mut returnee: Vec<vk::Framebuffer> = Vec::with_capacity(views.len());
     for view in views {
         let framebuffer_info = vk::FramebufferCreateInfo {
@@ -332,7 +338,7 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     device.cmd_set_scissor(command_buffer,0,&[scissor]);
 
 
-    device.cmd_draw(command_buffer,3,1,0,0);
+    device.cmd_draw(command_buffer,4,1,0,0);
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();
@@ -342,29 +348,30 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
 pub(crate) unsafe fn recreate_swapchain(
     device: &Device,
     window: &Window,
-    surface: SurfaceKHR,
+    surface: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice,
-    render_pass: RenderPass,
+    render_pass: vk::RenderPass,
 
-    old_swapchain: SwapchainKHR,
-    old_views: Vec<ImageView>,
-    old_framebuffers: Vec<Framebuffer>,
+    old_swapchain: vk::SwapchainKHR,
+    old_views: Vec<vk::ImageView>,
+    old_framebuffers: Vec<vk::Framebuffer>,
+    old_synchronization: Vec<SYN>,
 
     ext_surface: &khr::surface::Instance,
     ext_swapchain: &khr::swapchain::Device,
-) -> (vk::SwapchainKHR,Vec<vk::Image>,Vec<vk::ImageView>,Vec<vk::Framebuffer>,vk::Extent2D) {
+) -> (vk::SwapchainKHR,Vec<vk::Image>,Vec<vk::ImageView>,Vec<vk::Framebuffer>,vk::Extent2D,Vec<SYN>) {
 
     device.device_wait_idle().unwrap(); // todo!
 
     // todo!   PASS OLD SWAPCHAIN TO NEW SWAPCHAIN CREATION AND WAIT WITH SWAPCHAIN CLEANUP UNTIL THERE'S NO MORE FRAMES IN FLIGHT OF THE OLD ONE
-    swapchain_cleanup(device,ext_swapchain,old_swapchain,old_views,old_framebuffers);
+    swapchain_cleanup(device,ext_swapchain,old_swapchain,old_views,old_framebuffers,old_synchronization);
 
-    let (swapchain,format,extent) = create_swapchain(&window, surface, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
+    let (swapchain,format,extent,syn) = create_swapchain(&window, surface, device, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
     let images = ext_swapchain.get_swapchain_images(swapchain).unwrap();    // todo!
     let views = create_views(device,&images,format);
     let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(device,window,&views,render_pass);
 
-    (swapchain,images,views,framebuffers,extent)
+    (swapchain,images,views,framebuffers,extent,syn)
 }
 
 pub(crate) unsafe fn swapchain_cleanup(
@@ -372,8 +379,12 @@ pub(crate) unsafe fn swapchain_cleanup(
     ext_swapchain: &khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
     views: Vec<vk::ImageView>,
-    framebuffers: Vec<vk::Framebuffer>
+    framebuffers: Vec<vk::Framebuffer>,
+    synchronization: Vec<SYN>,
 ) {
+    for syn in synchronization {
+        syn.destroy(device);
+    }
     for framebuffer in framebuffers {
         device.destroy_framebuffer(framebuffer,None);
     }
