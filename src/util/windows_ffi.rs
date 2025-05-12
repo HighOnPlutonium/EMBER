@@ -13,6 +13,7 @@ use std::os::raw::c_void;
 use winit::platform::windows::HWND;
 
 
+#[allow(unused)]//quality checks can't see runtime usage
 pub struct WindowsFFI {
     pub set_window_composition_attribute: fn(HWND, *mut WCAData) -> bool,
     pub get_window_composition_attribute: fn(HWND, *mut WCAData) -> bool,
@@ -47,6 +48,7 @@ impl WCAData {
         }
     }
 }
+#[allow(unused)]//quality checks can't see runtime usage
 #[allow(non_camel_case_types)]
 #[repr(u32)]
 pub enum WCAttribute {

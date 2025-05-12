@@ -1,9 +1,7 @@
-use std::any::Any;
 use std::ffi;
 use std::ffi::CStr;
-use std::fmt::{format, Debug, Display};
-use std::vec::IntoIter;
-use ash::{vk, Instance};
+use std::fmt::Display;
+use ash::vk;
 use colored::{Color, ColoredString, Colorize};
 
 use log::{debug, error, info, trace, warn, Level, Log, Metadata, Record};

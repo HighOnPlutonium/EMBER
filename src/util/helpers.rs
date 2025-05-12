@@ -9,7 +9,6 @@ use crate::util::per_window::SYN;
 
 //the bare minimum
 fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact {
-
     let compiler = shaderc::Compiler::new().unwrap();
     let mut options = shaderc::CompileOptions::new().unwrap();
     //specify the entry point - here, it's "main"
@@ -19,6 +18,9 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
         //those two strings are really just there for (possible) error messages. they don't need to be correct at all.
         "shader.glsl", "main", Some(&options)).unwrap()
 }
+
+
+
 
 pub(crate) unsafe fn create_swapchain(
     window: &Window,
@@ -40,7 +42,7 @@ pub(crate) unsafe fn create_swapchain(
     //in case neither 32bit BGRA SRGB or 32bit RGBA SRGB are available, a default value.
     let mut format = *formats.first().unwrap();
     //ain't fuckin with any of the other color spaces, nor dealing with their availability for now. honestly go find a device other than a washing mashien or something that deosn't support SRGB color spaces
-    let mut color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+    let color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
     //SRGB is common and good. B8G8R8 format is also shockingly common in displays?
     if formats.contains(&vk::Format::B8G8R8A8_SRGB) { format = vk::Format::B8G8R8A8_SRGB } else if formats.contains(&vk::Format::R8G8B8A8_SRGB) { format = vk::Format::R8G8B8A8_SRGB }
 
@@ -323,7 +325,6 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     device.cmd_begin_render_pass(command_buffer,&render_pass_info,vk::SubpassContents::INLINE);
 
     device.cmd_bind_pipeline(command_buffer,vk::PipelineBindPoint::GRAPHICS,pipeline);
-
 
     //because we set the viewport and scissor as dynamic state previously, we gotta set them again.
     let viewport = vk::Viewport {

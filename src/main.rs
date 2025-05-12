@@ -1,6 +1,5 @@
 mod util;
 
-use std::any::type_name_of_val;
 use std::collections::HashMap;
 use util::per_window::PerWindow;
 
@@ -13,26 +12,19 @@ use ash::{khr, Device, Entry};
 use colored::Colorize;
 use log::{debug, error, info, warn, LevelFilter};
 use std::error::Error;
-use std::ffi::{c_char, CStr, CString};
-use std::hash::Hash;
-use std::ops::Deref;
-use std::process::exit;
-use std::{env, mem, ptr, slice};
-use std::slice::Iter;
-use ash::prelude::VkResult;
+use std::ffi::{c_char, CStr};
+use std::{env, mem, ptr};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
-use winit::event_loop;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::platform::windows::WindowAttributesExtWindows;
-use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
-use winit::window::{Window, WindowId};
+use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+use winit::window::WindowId;
 use crate::util::helpers::{record_into_buffer, recreate_swapchain, swapchain_cleanup};
 
 const APPLICATION_TITLE: &str = "EMBER";
-const WINDOW_COUNT: usize = 5;
+const WINDOW_COUNT: usize = 1;
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
@@ -177,7 +169,7 @@ fn main() -> Result<(),Box<dyn Error>> {
                     extensions.push(ext.as_ptr())}}
 
             Some((rating,*device,properties,features,extensions))}).collect()};
-    let device_opt = unsafe {
+    let device_opt = {
         let mut best_rating = u32::MAX;
         rated_devices.iter().for_each(|(rating,..)|{ best_rating = best_rating.min(*rating) });
         let suitable_devices = rated_devices.iter().filter_map(|(rating,device,properties,features,extensions)|{
@@ -221,7 +213,6 @@ fn main() -> Result<(),Box<dyn Error>> {
             ptr::from_ref(&address_debug_info).cast() } else { ptr::null() },
         queue_create_info_count: 1,
         p_queue_create_infos: &device_queue_create_info,
-        // todo! HARDCODED device extensions and no handling for missing swapchain support - ALTHOUGH, if there wasn't any, we'd intentionally panic!() with an error anyways.
         enabled_extension_count: phys_device_extensions.len() as u32,
         pp_enabled_extension_names: phys_device_extensions.as_ptr(),
         p_enabled_features: &phys_device_features,
@@ -300,6 +291,7 @@ fn main() -> Result<(),Box<dyn Error>> {
 
 
 pub(crate) struct App {
+    #[allow(unused)]
     entry: Entry,
     instance: Instance,
     device: Device,
@@ -311,6 +303,7 @@ pub(crate) struct App {
     windows: HashMap<WindowId,PerWindow>,
 
     ext: ExtensionHolder,
+    #[allow(unused)]
     win32_fp: Option<WindowsFFI>,
 
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
@@ -359,7 +352,7 @@ impl ApplicationHandler for App {
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 
-        let mut builder = WindowBuilder::new(&self.entry,&self.instance,&self.ext,&self.device,&self.physical_device,&self.command_pool);
+        let mut builder = WindowBuilder::new(&self.ext,&self.device,self.physical_device,self.command_pool);
         builder.attributes = builder.attributes
             .with_title(APPLICATION_TITLE)
             .with_active(true)

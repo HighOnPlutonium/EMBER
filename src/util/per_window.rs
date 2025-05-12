@@ -1,14 +1,12 @@
 use std::error::Error;
 use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
-use ash::{khr, vk, Device, Entry, Instance};
-use colored::Colorize;
-use log::{debug, error, info};
-use winit::dpi::PhysicalSize;
+use ash::{vk, Device};
+use log::error;
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{cleanup, ExtensionHolder, OSSurface, MAX_FRAMES_IN_FLIGHT};
+use crate::{ExtensionHolder, OSSurface, MAX_FRAMES_IN_FLIGHT};
 use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_swapchain, create_views};
 use crate::util::logging::Logged;
 
@@ -29,7 +27,15 @@ pub struct PerWindow {
 }
 
 impl PerWindow {
-    pub(crate) fn recreate(&mut self, swapchain: vk::SwapchainKHR, extent: vk::Extent2D, images: Vec<vk::Image>, views: Vec<vk::ImageView>, framebuffers: Vec<vk::Framebuffer>, syn: Vec<SYN>) {
+    pub(crate) fn recreate(
+        &mut self,
+        swapchain: vk::SwapchainKHR,
+        extent: vk::Extent2D,
+        images: Vec<vk::Image>,
+        views: Vec<vk::ImageView>,
+        framebuffers: Vec<vk::Framebuffer>,
+        syn: Vec<SYN>
+    ) {
         self.swapchain = swapchain;
         self.extent = extent;
         self.images = images;
@@ -64,21 +70,24 @@ impl SYN {
 }
 
 pub struct WindowBuilder<'a> {
-    entry: &'a Entry,
-    instance: &'a Instance,
     ext: &'a ExtensionHolder,
     device: &'a Device,
-    physical_device: &'a vk::PhysicalDevice,
-    command_pool: &'a vk::CommandPool,
+    physical_device: vk::PhysicalDevice,
+    command_pool: vk::CommandPool,
 
     pub attributes: WindowAttributes,
 }
 
 
 impl<'a> WindowBuilder<'a> {
-    pub fn new(entry: &'a Entry, instance: &'a Instance, ext: &'a ExtensionHolder, device: &'a Device, physical_device: &'a vk::PhysicalDevice, command_pool: &'a vk::CommandPool) -> Self {
+    pub fn new(
+        ext: &'a ExtensionHolder,
+        device: &'a Device,
+        physical_device: vk::PhysicalDevice,
+        command_pool: vk::CommandPool
+    ) -> Self {
         WindowBuilder {
-            entry,instance, ext, device, physical_device, command_pool,
+            ext, device, physical_device, command_pool,
             attributes: WindowAttributes::default()}
     }
     pub fn build(&self, event_loop: &'a ActiveEventLoop) -> (WindowId, PerWindow) {
@@ -87,7 +96,6 @@ impl<'a> WindowBuilder<'a> {
         let surface = unsafe {
             let window_handle = window.window_handle().unwrap().as_raw();
             let display_handle = event_loop.display_handle().unwrap().as_raw();
-
             match &self.ext.os_surface {
                 OSSurface::WINDOWS(instance) => {
                     let RawWindowHandle::Win32(hwnd) = window_handle else { error!("Window/Display Handles don't match. Just no."); panic!() };
@@ -124,16 +132,19 @@ impl<'a> WindowBuilder<'a> {
                         ..Default::default()};
                     instance.create_xlib_surface(&create_info,None).logged("Surface creation failure")
                 }
-                //you'd have to actively try to get this error and even then, I doubt it's possible without manually fiddling with the applications' memory.
-                _ => { error!("Window Handle doesn't match display handles tolerated by this application");
-                    //unsafe { cleanup() };  todo!  CLEANUP IN CASE OF PANIC
-                    panic!() }
             }
         };
 
 
         let (swapchain,format,extent,syn) = unsafe {
-            create_swapchain(&window, surface, self.device, *self.physical_device, &self.ext.surface, &self.ext.swapchain).unwrap() };    // todo!    ERROR HANDLING
+            create_swapchain(
+                &window,
+                surface,
+                self.device,
+                self.physical_device,
+                &self.ext.surface,
+                &self.ext.swapchain
+            ).unwrap() };    // todo!    ERROR HANDLING
         let images = unsafe { self.ext.swapchain.get_swapchain_images(swapchain).unwrap() };
         let views = unsafe { create_views(self.device,&images,format) };
 
@@ -142,7 +153,7 @@ impl<'a> WindowBuilder<'a> {
         let framebuffers: Vec<vk::Framebuffer> = unsafe { create_framebuffers(self.device,&window,&views,render_pass) };
 
         let cmd_alloc_info = vk::CommandBufferAllocateInfo {
-            command_pool: *self.command_pool,
+            command_pool: self.command_pool,
             level: vk::CommandBufferLevel::PRIMARY,
             command_buffer_count: MAX_FRAMES_IN_FLIGHT,
             ..Default::default()};
