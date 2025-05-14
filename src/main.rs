@@ -367,8 +367,8 @@ impl ApplicationHandler for App {
         (0..window_count).for_each(|idx| {
             builder.attributes.title = format!("{}  #{}",APPLICATION_TITLE,idx+1);
             let (window_id,per_window) = builder.build(event_loop);
-            let fp = unsafe { WindowsFFI::load_function_pointers() };
-            per_window.toggle_blur(&fp);
+            /*let fp = unsafe { WindowsFFI::load_function_pointers() };
+            per_window.toggle_blur(&fp);*/
             _ = self.windows.insert(window_id,per_window);
         });
 

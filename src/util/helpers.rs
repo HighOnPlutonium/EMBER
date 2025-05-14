@@ -339,7 +339,7 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     device.cmd_set_scissor(command_buffer,0,&[scissor]);
 
 
-    device.cmd_draw(command_buffer,4,1,0,0);
+    device.cmd_draw(command_buffer,3,1,0,0);
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();
