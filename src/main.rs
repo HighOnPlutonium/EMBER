@@ -1,4 +1,5 @@
 mod util;
+mod experimental;
 
 use std::collections::HashMap;
 use util::per_window::PerWindow;
@@ -14,18 +15,23 @@ use log::{debug, error, info, warn, LevelFilter};
 use std::error::Error;
 use std::ffi::{c_char, CStr};
 use std::{env, mem, ptr};
+use std::cell::LazyCell;
+use std::mem::MaybeUninit;
+use std::pin::Pin;
+use std::sync::LazyLock;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::WindowId;
+use once_cell::unsync::Lazy;
 use crate::util::helpers::{record_into_buffer, recreate_swapchain, swapchain_cleanup};
+
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
-
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 const VALIDATION_LAYERS: [&CStr;1] = [
@@ -35,22 +41,20 @@ const VALIDATION_LAYERS: [&CStr;1] = [
     //c"VK_LAYER_LUNARG_monitor",
     //c"VK_LAYER_KHRONOS_profiles",
     //c"VK_LAYER_KHRONOS_shader_object",
-
 ];
 const REQUIRED_EXTENSIONS: [&CStr; 1] = [
-    khr::surface::NAME ];
+    khr::surface::NAME,];
 const OPTIONAL_EXTENSIONS: [&CStr; 2] = [
     ext::debug_utils::NAME,
-    ext::debug_report::NAME,
-];
+    ext::debug_report::NAME,];
 const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
-    khr::swapchain::NAME,
-];
+    khr::swapchain::NAME,];
 const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 1] = [
-    ext::device_address_binding_report::NAME,
-];
+    ext::device_address_binding_report::NAME,];
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
+
+
 
 fn main() -> Result<(),Box<dyn Error>> {
 
@@ -59,7 +63,6 @@ fn main() -> Result<(),Box<dyn Error>> {
 
     log::set_logger(&LOGGER)?;
     log::set_max_level(LevelFilter::Trace);
-
 
     let event_loop = EventLoop::new()?;
     let entry = Entry::linked();
@@ -77,7 +80,6 @@ fn main() -> Result<(),Box<dyn Error>> {
         pfn_user_callback: Some(util::logging::debug_callback),
         p_user_data: ptr::null_mut(),
         ..Default::default()};
-
     let debug_report_create_info = vk::DebugReportCallbackCreateInfoEXT {
         flags: { type Flags = vk::DebugReportFlagsEXT;
             Flags::ERROR | Flags::DEBUG | Flags::INFORMATION | Flags::PERFORMANCE_WARNING | Flags::WARNING
@@ -141,8 +143,8 @@ fn main() -> Result<(),Box<dyn Error>> {
 
     let mut opt_device_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     // todo!    MAKE THIS SECTION LESS FUCKING UGLY
-    let rated_devices: Vec<(u32,vk::PhysicalDevice,vk::PhysicalDeviceProperties,vk::PhysicalDeviceFeatures,Vec<*const c_char>)>
-            = unsafe { instance.enumerate_physical_devices()?
+    let rated_devices: Vec<(u32,vk::PhysicalDevice,vk::PhysicalDeviceProperties,vk::PhysicalDeviceFeatures,Vec<*const c_char>)> = unsafe {
+        instance.enumerate_physical_devices()?
             .iter().filter_map(|device|{
             let mut rating = 0u32;
 
@@ -289,6 +291,23 @@ fn main() -> Result<(),Box<dyn Error>> {
 }
 
 
+/*struct Uninit<T> {}
+impl MaybeUninit<T> for Uninit<T> {}
+
+struct Prog<T> {
+    f0: u8,
+    f1: MaybeUninit<T>,
+    f2: MaybeUninit<T>,
+    f3: MaybeUninit<T>,
+}
+impl<T> Prog<T> {
+    fn uninit() -> Self {
+        Self {
+            f0: 0,
+            ..Default::default()
+        }
+    }
+}*/
 
 pub(crate) struct App {
     #[allow(unused)]
@@ -345,6 +364,9 @@ unsafe fn cleanup(
 }
 
 
+
+
+
 #[allow(unused)]
 impl ApplicationHandler for App {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
@@ -380,6 +402,8 @@ impl ApplicationHandler for App {
             let (window_id,per_window) = builder.build(event_loop);
             _ = self.windows.insert(window_id,per_window)
         }
+
+
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
@@ -427,7 +451,7 @@ impl ApplicationHandler for App {
                     self.device.destroy_pipeline(pipeline,None);
                     self.device.destroy_pipeline_layout(layout,None);
 
-                    swapchain_cleanup(&self.device,&self.ext.swapchain,swapchain,views,framebuffers,synchronization.clone());
+                    swapchain_cleanup(&self.device,&self.ext.swapchain,swapchain,&views,&framebuffers,&synchronization.clone());
 
                     self.device.destroy_render_pass(render_pass,None);
                     self.ext.surface.destroy_surface(surface,None);
@@ -451,14 +475,8 @@ impl ApplicationHandler for App {
                         Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                             let (swapchain,images,views,framebuffers,extent,syn) = recreate_swapchain(
                                 &self.device,
-                                window,
-                                *surface,
                                 self.physical_device,
-                                *render_pass,
-                                *swapchain,
-                                views.clone(),
-                                framebuffers.clone(),
-                                syn.clone(),
+                                per_window,
                                 &self.ext.surface,
                                 &self.ext.swapchain
                             );
@@ -522,14 +540,8 @@ impl ApplicationHandler for App {
                         #[allow()]
                         let (swapchain,images,views,framebuffers,extent,syn) = recreate_swapchain(
                             &self.device,
-                            window,
-                            *surface,
                             self.physical_device,
-                            *render_pass,
-                            *swapchain,
-                            views.clone(),
-                            framebuffers.clone(),
-                            syn.clone(),
+                            per_window,
                             &self.ext.surface,
                             &self.ext.swapchain
                         );

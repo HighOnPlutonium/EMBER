@@ -5,7 +5,7 @@ use shaderc::CompilationArtifact;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 use crate::MAX_FRAMES_IN_FLIGHT;
-use crate::util::per_window::SYN;
+use crate::util::per_window::{PerWindow, SYN};
 
 //the bare minimum
 fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact {
@@ -339,7 +339,7 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     device.cmd_set_scissor(command_buffer,0,&[scissor]);
 
 
-    device.cmd_draw(command_buffer,3,1,0,0);
+    device.cmd_draw(command_buffer,4,1,0,0);
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();
@@ -348,15 +348,9 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
 
 pub(crate) unsafe fn recreate_swapchain(
     device: &Device,
-    window: &Window,
-    surface: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice,
-    render_pass: vk::RenderPass,
 
-    old_swapchain: vk::SwapchainKHR,
-    old_views: Vec<vk::ImageView>,
-    old_framebuffers: Vec<vk::Framebuffer>,
-    old_synchronization: Vec<SYN>,
+    per_window: &mut PerWindow,
 
     ext_surface: &khr::surface::Instance,
     ext_swapchain: &khr::swapchain::Device,
@@ -365,12 +359,12 @@ pub(crate) unsafe fn recreate_swapchain(
     device.device_wait_idle().unwrap(); // todo!
 
     // todo!   PASS OLD SWAPCHAIN TO NEW SWAPCHAIN CREATION AND WAIT WITH SWAPCHAIN CLEANUP UNTIL THERE'S NO MORE FRAMES IN FLIGHT OF THE OLD ONE
-    swapchain_cleanup(device,ext_swapchain,old_swapchain,old_views,old_framebuffers,old_synchronization);
+    swapchain_cleanup(device,ext_swapchain,per_window.swapchain,&per_window.views,&per_window.framebuffers,&per_window.synchronization);
 
-    let (swapchain,format,extent,syn) = create_swapchain(&window, surface, device, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
+    let (swapchain,format,extent,syn) = create_swapchain(&per_window.window, per_window.surface, device, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
     let images = ext_swapchain.get_swapchain_images(swapchain).unwrap();    // todo!
     let views = create_views(device,&images,format);
-    let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(device,window,&views,render_pass);
+    let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(device,&per_window.window,&views,per_window.render_pass);
 
     (swapchain,images,views,framebuffers,extent,syn)
 }
@@ -379,18 +373,18 @@ pub(crate) unsafe fn swapchain_cleanup(
     device: &Device,
     ext_swapchain: &khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
-    views: Vec<vk::ImageView>,
-    framebuffers: Vec<vk::Framebuffer>,
-    synchronization: Vec<SYN>,
+    views: &Vec<vk::ImageView>,
+    framebuffers: &Vec<vk::Framebuffer>,
+    synchronization: &Vec<SYN>,
 ) {
     for syn in synchronization {
         syn.destroy(device);
     }
     for framebuffer in framebuffers {
-        device.destroy_framebuffer(framebuffer,None);
+        device.destroy_framebuffer(*framebuffer, None);
     }
     for view in views {
-        device.destroy_image_view(view,None);
+        device.destroy_image_view(*view,None);
     }
     ext_swapchain.destroy_swapchain(swapchain,None);
 }

@@ -100,7 +100,7 @@ impl<'a> WindowBuilder<'a> {
                 OSSurface::WINDOWS(instance) => {
                     let RawWindowHandle::Win32(hwnd) = window_handle else { error!("Window/Display Handles don't match. Just no."); panic!() };
                     let create_info = vk::Win32SurfaceCreateInfoKHR {
-                        hwnd: hwnd.hwnd.into(),
+                        hwnd: hwnd.hwnd.get(),
                         hinstance: hwnd.hinstance.unwrap().into(),
                         ..Default::default()};
                     instance.create_win32_surface(&create_info, None).logged("Surface creation failure")
