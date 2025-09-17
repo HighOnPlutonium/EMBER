@@ -6,6 +6,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 use crate::MAX_FRAMES_IN_FLIGHT;
 use crate::util::per_window::{PerWindow, SYN};
+use crate::util::swapchain::PerSwapchain;
 
 //the bare minimum
 fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact {
@@ -22,6 +23,10 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
 
 
 
+
+
+
+
 pub(crate) unsafe fn create_swapchain(
     window: &Window,
     surface: vk::SurfaceKHR,
@@ -29,14 +34,13 @@ pub(crate) unsafe fn create_swapchain(
     physical_device: vk::PhysicalDevice,
     ext_surface: &khr::surface::Instance,
     ext_swapchain: &khr::swapchain::Device
-) -> Result<(vk::SwapchainKHR,vk::Format,vk::Extent2D,Vec<SYN>),Box<dyn Error>> { //currently we just propagate possible issues to the caller. which kinda sucks.
+) -> Result<(vk::SwapchainKHR,vk::Format,vk::Extent2D,Vec<SYN>),Box<dyn Error>> {
+    //currently we just propagate possible issues to the caller. which kinda sucks.
     //if we want to do anything fun we'll need a swapchain - and that's a per-surface thingy
     // todo! actually use all this information, and decide on proper swapchain settings based on them
     let capabilities = ext_surface.get_physical_device_surface_capabilities(physical_device, surface)?;
     let formats = ext_surface.get_physical_device_surface_formats(physical_device, surface)?;
-    #[allow(unused)]
     let present_modes = ext_surface.get_physical_device_surface_present_modes(physical_device, surface)?;
-    #[allow(unused)]
     let (formats, color_spaces) = formats.iter().map(|format| (format.format, format.color_space)).collect::<(Vec<vk::Format>, Vec<vk::ColorSpaceKHR>)>();
 
     //in case neither 32bit BGRA SRGB or 32bit RGBA SRGB are available, a default value.
@@ -68,7 +72,7 @@ pub(crate) unsafe fn create_swapchain(
         //queue_family_index_count: ,
         //p_queue_family_indices: ,
         pre_transform: capabilities.current_transform,
-        composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE, // todo!   INHERIT would be better but for some reason it's causing trouble on my PC (but not my laptop)
+        composite_alpha: vk::CompositeAlphaFlagsKHR::INHERIT, // todo!   INHERIT would be better but for some reason it's causing trouble on my PC (but not my laptop)
         present_mode: vk::PresentModeKHR::FIFO,
         //we don't care about obscured pixels (for now)
         clipped: vk::TRUE,
@@ -354,40 +358,23 @@ pub(crate) unsafe fn recreate_swapchain(
 
     ext_surface: &khr::surface::Instance,
     ext_swapchain: &khr::swapchain::Device,
-) -> (vk::SwapchainKHR,Vec<vk::Image>,Vec<vk::ImageView>,Vec<vk::Framebuffer>,vk::Extent2D,Vec<SYN>) {
+) {
 
     device.device_wait_idle().unwrap(); // todo!
 
     // todo!   PASS OLD SWAPCHAIN TO NEW SWAPCHAIN CREATION AND WAIT WITH SWAPCHAIN CLEANUP UNTIL THERE'S NO MORE FRAMES IN FLIGHT OF THE OLD ONE
-    swapchain_cleanup(device,ext_swapchain,per_window.swapchain,&per_window.views,&per_window.framebuffers,&per_window.synchronization);
+    per_window.swapchain.cleanup(device,ext_swapchain);
 
-    let (swapchain,format,extent,syn) = create_swapchain(&per_window.window, per_window.surface, device, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
+    let (swapchain,format,extent,sync) = create_swapchain(&per_window.window, per_window.surface, device, physical_device, ext_surface, ext_swapchain).unwrap(); // todo!
     let images = ext_swapchain.get_swapchain_images(swapchain).unwrap();    // todo!
     let views = create_views(device,&images,format);
     let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(device,&per_window.window,&views,per_window.render_pass);
 
-    (swapchain,images,views,framebuffers,extent,syn)
+    per_window.swapchain = PerSwapchain {
+        handle: swapchain, format, extent, images, views, framebuffers, sync };
 }
 
-pub(crate) unsafe fn swapchain_cleanup(
-    device: &Device,
-    ext_swapchain: &khr::swapchain::Device,
-    swapchain: vk::SwapchainKHR,
-    views: &Vec<vk::ImageView>,
-    framebuffers: &Vec<vk::Framebuffer>,
-    synchronization: &Vec<SYN>,
-) {
-    for syn in synchronization {
-        syn.destroy(device);
-    }
-    for framebuffer in framebuffers {
-        device.destroy_framebuffer(*framebuffer, None);
-    }
-    for view in views {
-        device.destroy_image_view(*view,None);
-    }
-    ext_swapchain.destroy_swapchain(swapchain,None);
-}
+
 
 pub(crate) unsafe fn create_views(device: &Device, images: &Vec<vk::Image>, format: vk::Format) -> Vec<vk::ImageView> {
     let mut views: Vec<vk::ImageView> = Vec::with_capacity(images.len());

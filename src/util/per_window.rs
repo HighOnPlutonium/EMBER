@@ -9,41 +9,21 @@ use winit::window::{Window, WindowAttributes, WindowId};
 use crate::{ExtensionHolder, OSSurface, MAX_FRAMES_IN_FLIGHT};
 use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_swapchain, create_views};
 use crate::util::logging::Logged;
+use crate::util::swapchain::PerSwapchain;
 
 pub struct PerWindow {
     pub window: Window,
     pub surface: vk::SurfaceKHR,
-    pub swapchain: vk::SwapchainKHR,
-    pub images: Vec<vk::Image>,
-    pub views: Vec<vk::ImageView>,
-    pub framebuffers: Vec<vk::Framebuffer>,
-    pub format: vk::Format,
-    pub extent: vk::Extent2D,
+    pub swapchain: PerSwapchain,
+
     pub render_pass: vk::RenderPass,
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     pub command_buffers: Vec<vk::CommandBuffer>,
-    pub synchronization: Vec<SYN>,
 }
 
-impl PerWindow {
-    pub(crate) fn recreate(
-        &mut self,
-        swapchain: vk::SwapchainKHR,
-        extent: vk::Extent2D,
-        images: Vec<vk::Image>,
-        views: Vec<vk::ImageView>,
-        framebuffers: Vec<vk::Framebuffer>,
-        syn: Vec<SYN>
-    ) {
-        self.swapchain = swapchain;
-        self.extent = extent;
-        self.images = images;
-        self.views = views;
-        self.framebuffers = framebuffers;
-        self.synchronization = syn;
-    }
-}
+
+
 
 #[derive(Copy,Clone)]
 pub(crate) struct SYN {
@@ -62,7 +42,7 @@ impl SYN {
         let in_flight    = device.create_fence(&fence_info,None)?;
         Ok(Self {swapchain,presentation,in_flight})
     }
-    pub(crate) unsafe fn destroy(self, device: &Device) {
+    pub(crate) unsafe fn destroy(&self, device: &Device) {
         device.destroy_semaphore(self.swapchain,None);
         device.destroy_semaphore(self.presentation,None);
         device.destroy_fence(self.in_flight,None);
@@ -136,7 +116,7 @@ impl<'a> WindowBuilder<'a> {
         };
 
 
-        let (swapchain,format,extent,syn) = unsafe {
+        let (swapchain,format,extent,sync) = unsafe {
             create_swapchain(
                 &window,
                 surface,
@@ -161,13 +141,11 @@ impl<'a> WindowBuilder<'a> {
 
 
         (window.id(), PerWindow { window, surface,
-            swapchain, images, views,
-            framebuffers,
-            format, extent,
+            swapchain: PerSwapchain {
+                handle: swapchain, format, extent, images, views, framebuffers, sync },
             render_pass,
             pipeline, layout,
             command_buffers,
-            synchronization: syn,
         })
     }
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use util::per_window::PerWindow;
 
 use crate::util::logging::{ConsoleLogger, Logged};
-use crate::util::per_window::WindowBuilder;
+use crate::util::per_window::{WindowBuilder};
 use crate::util::windows_ffi::WindowsFFI;
 use ash::{ext, vk};
 use ash::Instance;
@@ -15,10 +15,10 @@ use log::{debug, error, info, warn, LevelFilter};
 use std::error::Error;
 use std::ffi::{c_char, CStr};
 use std::{env, mem, ptr};
-use std::cell::LazyCell;
+use std::cell::{LazyCell, OnceCell};
 use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
@@ -27,8 +27,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::WindowId;
 use once_cell::unsync::Lazy;
-use crate::util::helpers::{record_into_buffer, recreate_swapchain, swapchain_cleanup};
-
+use crate::util::helpers::{record_into_buffer, recreate_swapchain};
+use crate::util::swapchain::PerSwapchain;
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
@@ -56,6 +56,9 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 
 
 
+static ENTRY: Entry = unsafe { mem::transmute(mem::zeroed::<[u8;size_of::<Entry>()]>()) };
+static INSTANCE: Instance = unsafe { mem::transmute(mem::zeroed::<[u8;size_of::<Instance>()]>()) };
+
 fn main() -> Result<(),Box<dyn Error>> {
 
     ansi_term::enable_ansi_support().unwrap();
@@ -65,8 +68,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     log::set_max_level(LevelFilter::Trace);
 
     let event_loop = EventLoop::new()?;
-    let entry = Entry::linked();
-
+    unsafe { *ENTRY = Entry::linked() };
 
     //needs to be defined here already, cuz we need to pass a CreateInfo struct in instance creation, so that our debug messenger can hook into instance and device stuff
     //doesn't NEED to be the same struct as the one we use to create the debug messenger, but it takes basically no effort to just reuse it instead.
@@ -92,7 +94,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     //OPTional_EXTension_LOCK - contains the names of optional extensions that ended up being unavailable, so that we can check for this once we try and load their function pointers
     let mut opt_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     //contains more than fits on the screen
-    let instance = {
+    unsafe { *INSTANCE = {
         let extensions: Vec<*const c_char> = {
             //(platform-dependent!) extension for surface creation.
             let prerequisite: &CStr = match event_loop.display_handle()?.as_raw() {
@@ -102,7 +104,7 @@ fn main() -> Result<(),Box<dyn Error>> {
                     RawDisplayHandle::Wayland(_) => khr::wayland_surface::NAME,
                     tmp => { error!("Support for {} is unimplemented",format!("{:?}",tmp).bright_purple()); panic!() }};
             //when shadowing a variable, it's allowed to own references to the previous binding.
-            let available: Vec<vk::ExtensionProperties> = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
+            let available: Vec<vk::ExtensionProperties> = unsafe { ENTRY.enumerate_instance_extension_properties(None).unwrap() };
             let available: Vec<&CStr> = available.iter().map(|ext|ext.extension_name_as_c_str().unwrap()).collect();
             //checking if extensions we want are available, then storing the raw pointers
             let mut extensions: Vec<*const c_char> = Vec::with_capacity(1+REQUIRED_EXTENSIONS.len()+OPTIONAL_EXTENSIONS.len());
@@ -118,7 +120,7 @@ fn main() -> Result<(),Box<dyn Error>> {
         };
         let layers = {
             //same idea as in the "extensions"-block.
-            let available: Vec<vk::LayerProperties> = unsafe { entry.enumerate_instance_layer_properties()? };
+            let available: Vec<vk::LayerProperties> = unsafe { ENTRY.enumerate_instance_layer_properties()? };
             let available: Vec<&CStr> = available.iter().map(|layer|layer.layer_name_as_c_str().unwrap()).collect();
             VALIDATION_LAYERS.iter().filter_map(|layer| {
                 if available.contains(layer) { Some(layer.as_ptr()) }
@@ -138,19 +140,19 @@ fn main() -> Result<(),Box<dyn Error>> {
             enabled_layer_count: layers.len() as u32,
             ..Default::default()};
 
-        unsafe { entry.create_instance(&create_info, None)? }
-    };
+        unsafe { ENTRY.create_instance(&create_info, None)? }
+    }};
 
     let mut opt_device_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     // todo!    MAKE THIS SECTION LESS FUCKING UGLY
     let rated_devices: Vec<(u32,vk::PhysicalDevice,vk::PhysicalDeviceProperties,vk::PhysicalDeviceFeatures,Vec<*const c_char>)> = unsafe {
-        instance.enumerate_physical_devices()?
+        INSTANCE.enumerate_physical_devices()?
             .iter().filter_map(|device|{
             let mut rating = 0u32;
 
-            let properties = instance.get_physical_device_properties(*device);
-            let features   = instance.get_physical_device_features(*device);
-            let available_extensions: Vec<vk::ExtensionProperties> = instance.enumerate_device_extension_properties(*device).unwrap();
+            let properties = INSTANCE.get_physical_device_properties(*device);
+            let features   = INSTANCE.get_physical_device_features(*device);
+            let available_extensions: Vec<vk::ExtensionProperties> = INSTANCE.enumerate_device_extension_properties(*device).unwrap();
             let available_extensions: Vec<&CStr> = available_extensions.iter().map(|properties|properties.extension_name_as_c_str().unwrap()).collect();
             let mut extensions: Vec<*const c_char> = Vec::with_capacity(
                 REQUIRED_DEVICE_EXTENSIONS.len()+OPTIONAL_DEVICE_EXTENSIONS.len());
@@ -194,7 +196,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     // todo!("check for valid queue families during physical device selection")
     // todo!("deal with presentation support and possible dedicated queues per task")
     let queue_family_index = unsafe {
-        let queue_families = instance.get_physical_device_queue_family_properties(phys_device);
+        let queue_families = INSTANCE.get_physical_device_queue_family_properties(phys_device);
         queue_families.iter().enumerate().filter_map(|(usize,&properties)| {
             properties.queue_flags.contains(vk::QueueFlags::GRAPHICS).then_some(usize)
         }).next().unwrap()} as u32;
@@ -220,23 +222,24 @@ fn main() -> Result<(),Box<dyn Error>> {
         p_enabled_features: &phys_device_features,
         ..Default::default()};
 
-    let device = unsafe { instance.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
+    let device = unsafe { INSTANCE.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
+    static KHR_SURFACE: LazyLock<khr::surface::Instance> = LazyLock::new(||{ khr::surface::Instance::new(&ENTRY,&INSTANCE) });
 
     let extension_holder = ExtensionHolder {
-        surface: khr::surface::Instance::new(&entry,&instance),
+        surface: khr::surface::Instance::new(&ENTRY,&INSTANCE),
         os_surface: match event_loop.display_handle()?.as_raw() {
-            RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&entry,&instance)),
-            RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&entry,&instance)),
-            RawDisplayHandle::Xcb(_) => OSSurface::XCB(khr::xcb_surface::Instance::new(&entry,&instance)),
-            RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&entry,&instance)),
+            RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&ENTRY,&INSTANCE)),
+            RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&ENTRY,&INSTANCE)),
+            RawDisplayHandle::Xcb(_) => OSSurface::XCB(khr::xcb_surface::Instance::new(&ENTRY,&INSTANCE)),
+            RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&ENTRY,&INSTANCE)),
             _ => { unreachable!() }},
         debug_utils: (!opt_ext_lock.contains(&ext::debug_utils::NAME)).then(||
-            ext::debug_utils::Instance::new(&entry,&instance)),
+            ext::debug_utils::Instance::new(&ENTRY,&INSTANCE)),
         debug_report: (!opt_ext_lock.contains(&ext::debug_report::NAME)).then(||
-            ext::debug_report::Instance::new(&entry,&instance)),
-        swapchain: khr::swapchain::Device::new(&instance,&device),
+            ext::debug_report::Instance::new(&ENTRY,&INSTANCE)),
+        swapchain: khr::swapchain::Device::new(&INSTANCE,&device),
     };
 
     let command_pool_info = vk::CommandPoolCreateInfo {
@@ -268,8 +271,6 @@ fn main() -> Result<(),Box<dyn Error>> {
     //THIS IS THE LAST THING THAT ENDS UP RUNNING IN HERE - AFTER THIS, IT'S OFF TO THE WINDOW EVENT LOOP
     //and once the event loop exits we also exit the actual application
     match event_loop.run_app(&mut App {
-        entry,
-        instance,
         device,
         physical_device: phys_device,
         queue,
@@ -291,28 +292,15 @@ fn main() -> Result<(),Box<dyn Error>> {
 }
 
 
-/*struct Uninit<T> {}
-impl MaybeUninit<T> for Uninit<T> {}
 
-struct Prog<T> {
-    f0: u8,
-    f1: MaybeUninit<T>,
-    f2: MaybeUninit<T>,
-    f3: MaybeUninit<T>,
-}
-impl<T> Prog<T> {
-    fn uninit() -> Self {
-        Self {
-            f0: 0,
-            ..Default::default()
-        }
-    }
-}*/
+
+
+
+
+
 
 pub(crate) struct App {
     #[allow(unused)]
-    entry: Entry,
-    instance: Instance,
     device: Device,
     //i *think* there's no way to retrieve the physical device handle from a logical device
     physical_device: vk::PhysicalDevice,
@@ -378,7 +366,7 @@ impl ApplicationHandler for App {
         builder.attributes = builder.attributes
             .with_title(APPLICATION_TITLE)
             .with_active(true)
-            .with_transparent(false)
+            .with_transparent(true)
             .with_inner_size(Size::Logical(LogicalSize::new(400f64,400f64)));
 
         let mut window_count = WINDOW_COUNT;
@@ -389,8 +377,8 @@ impl ApplicationHandler for App {
         (0..window_count).for_each(|idx| {
             builder.attributes.title = format!("{}  #{}",APPLICATION_TITLE,idx+1);
             let (window_id,per_window) = builder.build(event_loop);
-            /*let fp = unsafe { WindowsFFI::load_function_pointers() };
-            per_window.toggle_blur(&fp);*/
+            let fp = unsafe { WindowsFFI::load_function_pointers() };
+            per_window.toggle_blur(&fp);
             _ = self.windows.insert(window_id,per_window);
         });
 
@@ -414,17 +402,12 @@ impl ApplicationHandler for App {
         let PerWindow {
             window,
             surface,
-            swapchain,
-            images,
-            views,
-            framebuffers,
-            format,
-            extent,
+            ref swapchain,
             render_pass,
             pipeline,
             layout,
-            command_buffers,
-            synchronization: syn } = per_window;
+            command_buffers
+        } = per_window;
 
         match event {
             WindowEvent::KeyboardInput { event, .. } =>
@@ -443,7 +426,7 @@ impl ApplicationHandler for App {
                     "Closing Window with {}",
                     format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple());
 
-                let PerWindow {surface,layout,framebuffers,pipeline,render_pass,swapchain,views,synchronization, .. } = self.windows.remove(&window_id).unwrap();
+                let PerWindow {surface,layout,pipeline,render_pass,swapchain, .. } = self.windows.remove(&window_id).unwrap();
                 unsafe {
                     //VERY IMPORTANT! otherwise, we'd try cleaning up semaphores n stuff while they're still in use
                     self.device.device_wait_idle().unwrap();
@@ -451,7 +434,7 @@ impl ApplicationHandler for App {
                     self.device.destroy_pipeline(pipeline,None);
                     self.device.destroy_pipeline_layout(layout,None);
 
-                    swapchain_cleanup(&self.device,&self.ext.swapchain,swapchain,&views,&framebuffers,&synchronization.clone());
+                    swapchain.cleanup(&self.device, &self.ext.swapchain);
 
                     self.device.destroy_render_pass(render_pass,None);
                     self.ext.surface.destroy_surface(surface,None);
@@ -467,22 +450,20 @@ impl ApplicationHandler for App {
                 let device = &self.device;
                 let ext = &self.ext;
 
-                unsafe { device.wait_for_fences(&[syn[self.current_frame].in_flight],true,u64::MAX).unwrap() };
+                unsafe { device.wait_for_fences(&[swapchain.sync[self.current_frame].in_flight],true,u64::MAX).unwrap() };
 
                 let next = unsafe {
-                    match ext.swapchain.acquire_next_image(*swapchain, u64::MAX, syn[self.current_frame].swapchain.clone(), vk::Fence::null()) {
+                    match ext.swapchain.acquire_next_image(swapchain.handle, u64::MAX, swapchain.sync[self.current_frame].swapchain.clone(), vk::Fence::null()) {
                         Ok((next,false)) => { next }
                         Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                            let (swapchain,images,views,framebuffers,extent,syn) = recreate_swapchain(
+                            recreate_swapchain(
                                 &self.device,
                                 self.physical_device,
                                 per_window,
                                 &self.ext.surface,
                                 &self.ext.swapchain
                             );
-                            per_window.recreate(swapchain,extent,images,views,framebuffers,syn.clone());
-
-                            let (next,_) = ext.swapchain.acquire_next_image(swapchain, u64::MAX, syn[self.current_frame].swapchain, vk::Fence::null()).unwrap();
+                            let (next,_) = ext.swapchain.acquire_next_image(per_window.swapchain.handle, u64::MAX, per_window.swapchain.sync[self.current_frame].swapchain, vk::Fence::null()).unwrap();
                             next
                         }
                         Err(e) => { error!("Swapchain recreation failed fatally: {:?}",e); panic!() }   // todo!    EMERGENCY CLEANUP
@@ -494,42 +475,37 @@ impl ApplicationHandler for App {
                     window,
                     surface,
                     swapchain,
-                    images,
-                    views,
-                    framebuffers,
-                    format,
-                    extent,
                     render_pass,
                     pipeline,
                     layout,
-                    command_buffers,
-                    synchronization: syn } = per_window;
+                    command_buffers
+                } = per_window;
 
-                unsafe { device.reset_fences(&[syn[self.current_frame].in_flight]).unwrap() };
+                unsafe { device.reset_fences(&[swapchain.sync[self.current_frame].in_flight]).unwrap() };
 
 
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };
-                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,framebuffers[next as usize],*extent,command_buffers[self.current_frame],next) };
+                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],swapchain.extent,command_buffers[self.current_frame],next) };
 
                 window.pre_present_notify();
 
                 let submit_info = vk::SubmitInfo {
                     wait_semaphore_count: 1,
-                    p_wait_semaphores: ptr::from_ref(&syn[self.current_frame].swapchain),
+                    p_wait_semaphores: ptr::from_ref(&swapchain.sync[self.current_frame].swapchain),
                     p_wait_dst_stage_mask: ptr::from_ref(&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
                     command_buffer_count: 1,
                     p_command_buffers: ptr::from_ref(&command_buffers[self.current_frame]),
                     signal_semaphore_count: 1,
-                    p_signal_semaphores: ptr::from_ref(&syn[self.current_frame].presentation),
+                    p_signal_semaphores: ptr::from_ref(&swapchain.sync[self.current_frame].presentation),
                     ..Default::default()};
-                unsafe { device.queue_submit(self.queue,&[submit_info], syn[self.current_frame].in_flight).unwrap() };
+                unsafe { device.queue_submit(self.queue,&[submit_info], swapchain.sync[self.current_frame].in_flight).unwrap() };
 
                 let present_info = vk::PresentInfoKHR {
                     wait_semaphore_count: 1,
-                    p_wait_semaphores: ptr::from_ref(&syn[self.current_frame].presentation),
+                    p_wait_semaphores: ptr::from_ref(&swapchain.sync[self.current_frame].presentation),
                     swapchain_count: 1,
-                    p_swapchains: ptr::from_ref(swapchain),
+                    p_swapchains: ptr::from_ref(&swapchain.handle),
                     p_image_indices: ptr::from_ref(&next),
                     p_results: ptr::null_mut(),
                     ..Default::default()};
@@ -537,15 +513,13 @@ impl ApplicationHandler for App {
                 unsafe { match ext.swapchain.queue_present(self.queue,&present_info) {
                     Ok(_) => {}
                     Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                        #[allow()]
-                        let (swapchain,images,views,framebuffers,extent,syn) = recreate_swapchain(
+                        recreate_swapchain(
                             &self.device,
                             self.physical_device,
                             per_window,
                             &self.ext.surface,
                             &self.ext.swapchain
                         );
-                        per_window.recreate(swapchain,extent,images,views,framebuffers,syn);
                     }
                     Err(e) => { error!("Swapchain recreation failed fatally: {:?}",e); panic!() }   // todo!    EMERGENCY CLEANUP
                 }};
@@ -572,7 +546,7 @@ impl ApplicationHandler for App {
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device.destroy_command_pool(self.command_pool,None);
-            cleanup(&self.instance,&self.ext,self.debug_messenger,self.debug_reporter,&self.device);
+            cleanup(INSTANCE,&self.ext,self.debug_messenger,self.debug_reporter,&self.device);
         }
 
     }
