@@ -7,7 +7,7 @@ use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 use crate::{ExtensionHolder, OSSurface, MAX_FRAMES_IN_FLIGHT};
-use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_swapchain, create_views};
+use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_views};
 use crate::util::logging::Logged;
 use crate::util::swapchain::PerSwapchain;
 
@@ -117,7 +117,7 @@ impl<'a> WindowBuilder<'a> {
 
 
         let (swapchain,format,extent,sync) = unsafe {
-            create_swapchain(
+            PerSwapchain::create_swapchain(
                 &window,
                 surface,
                 self.device,

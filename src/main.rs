@@ -18,7 +18,7 @@ use std::{env, mem, ptr};
 use std::cell::{LazyCell, OnceCell};
 use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
@@ -31,7 +31,7 @@ use crate::util::helpers::{record_into_buffer, recreate_swapchain};
 use crate::util::swapchain::PerSwapchain;
 
 const APPLICATION_TITLE: &str = "EMBER";
-const WINDOW_COUNT: usize = 1;
+const WINDOW_COUNT: usize = 3;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 const VALIDATION_LAYERS: [&CStr;1] = [
@@ -56,8 +56,7 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 
 
 
-static ENTRY: Entry = unsafe { mem::transmute(mem::zeroed::<[u8;size_of::<Entry>()]>()) };
-static INSTANCE: Instance = unsafe { mem::transmute(mem::zeroed::<[u8;size_of::<Instance>()]>()) };
+static ENTRY: LazyLock<Entry> = LazyLock::new(Entry::linked);
 
 fn main() -> Result<(),Box<dyn Error>> {
 
@@ -68,7 +67,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     log::set_max_level(LevelFilter::Trace);
 
     let event_loop = EventLoop::new()?;
-    unsafe { *ENTRY = Entry::linked() };
+
 
     //needs to be defined here already, cuz we need to pass a CreateInfo struct in instance creation, so that our debug messenger can hook into instance and device stuff
     //doesn't NEED to be the same struct as the one we use to create the debug messenger, but it takes basically no effort to just reuse it instead.
@@ -94,7 +93,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     //OPTional_EXTension_LOCK - contains the names of optional extensions that ended up being unavailable, so that we can check for this once we try and load their function pointers
     let mut opt_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     //contains more than fits on the screen
-    unsafe { *INSTANCE = {
+    let instance = {
         let extensions: Vec<*const c_char> = {
             //(platform-dependent!) extension for surface creation.
             let prerequisite: &CStr = match event_loop.display_handle()?.as_raw() {
@@ -118,6 +117,9 @@ fn main() -> Result<(),Box<dyn Error>> {
                 error!("Optional extension {} unavailable; Corresponding features {}",format!("{:?}",optional).bright_purple(),"locked".red()) } }
             extensions
         };
+        
+        
+        
         let layers = {
             //same idea as in the "extensions"-block.
             let available: Vec<vk::LayerProperties> = unsafe { ENTRY.enumerate_instance_layer_properties()? };
@@ -141,18 +143,18 @@ fn main() -> Result<(),Box<dyn Error>> {
             ..Default::default()};
 
         unsafe { ENTRY.create_instance(&create_info, None)? }
-    }};
+    };
 
     let mut opt_device_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     // todo!    MAKE THIS SECTION LESS FUCKING UGLY
     let rated_devices: Vec<(u32,vk::PhysicalDevice,vk::PhysicalDeviceProperties,vk::PhysicalDeviceFeatures,Vec<*const c_char>)> = unsafe {
-        INSTANCE.enumerate_physical_devices()?
+        instance.enumerate_physical_devices()?
             .iter().filter_map(|device|{
             let mut rating = 0u32;
 
-            let properties = INSTANCE.get_physical_device_properties(*device);
-            let features   = INSTANCE.get_physical_device_features(*device);
-            let available_extensions: Vec<vk::ExtensionProperties> = INSTANCE.enumerate_device_extension_properties(*device).unwrap();
+            let properties = instance.get_physical_device_properties(*device);
+            let features   = instance.get_physical_device_features(*device);
+            let available_extensions: Vec<vk::ExtensionProperties> = instance.enumerate_device_extension_properties(*device).unwrap();
             let available_extensions: Vec<&CStr> = available_extensions.iter().map(|properties|properties.extension_name_as_c_str().unwrap()).collect();
             let mut extensions: Vec<*const c_char> = Vec::with_capacity(
                 REQUIRED_DEVICE_EXTENSIONS.len()+OPTIONAL_DEVICE_EXTENSIONS.len());
@@ -196,7 +198,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     // todo!("check for valid queue families during physical device selection")
     // todo!("deal with presentation support and possible dedicated queues per task")
     let queue_family_index = unsafe {
-        let queue_families = INSTANCE.get_physical_device_queue_family_properties(phys_device);
+        let queue_families = instance.get_physical_device_queue_family_properties(phys_device);
         queue_families.iter().enumerate().filter_map(|(usize,&properties)| {
             properties.queue_flags.contains(vk::QueueFlags::GRAPHICS).then_some(usize)
         }).next().unwrap()} as u32;
@@ -222,24 +224,24 @@ fn main() -> Result<(),Box<dyn Error>> {
         p_enabled_features: &phys_device_features,
         ..Default::default()};
 
-    let device = unsafe { INSTANCE.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
+    let device = unsafe { instance.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
-    static KHR_SURFACE: LazyLock<khr::surface::Instance> = LazyLock::new(||{ khr::surface::Instance::new(&ENTRY,&INSTANCE) });
+    //static KHR_SURFACE: LazyLock<khr::surface::Instance> = LazyLock::new(||{ khr::surface::Instance::new(&ENTRY,&instance) });
 
     let extension_holder = ExtensionHolder {
-        surface: khr::surface::Instance::new(&ENTRY,&INSTANCE),
+        surface: khr::surface::Instance::new(&ENTRY,&instance),
         os_surface: match event_loop.display_handle()?.as_raw() {
-            RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&ENTRY,&INSTANCE)),
-            RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&ENTRY,&INSTANCE)),
-            RawDisplayHandle::Xcb(_) => OSSurface::XCB(khr::xcb_surface::Instance::new(&ENTRY,&INSTANCE)),
-            RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&ENTRY,&INSTANCE)),
+            RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&ENTRY,&instance)),
+            RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&ENTRY,&instance)),
+            RawDisplayHandle::Xcb(_) => OSSurface::XCB(khr::xcb_surface::Instance::new(&ENTRY,&instance)),
+            RawDisplayHandle::Xlib(_) => OSSurface::XLIB(khr::xlib_surface::Instance::new(&ENTRY,&instance)),
             _ => { unreachable!() }},
         debug_utils: (!opt_ext_lock.contains(&ext::debug_utils::NAME)).then(||
-            ext::debug_utils::Instance::new(&ENTRY,&INSTANCE)),
+            ext::debug_utils::Instance::new(&ENTRY,&instance)),
         debug_report: (!opt_ext_lock.contains(&ext::debug_report::NAME)).then(||
-            ext::debug_report::Instance::new(&ENTRY,&INSTANCE)),
-        swapchain: khr::swapchain::Device::new(&INSTANCE,&device),
+            ext::debug_report::Instance::new(&ENTRY,&instance)),
+        swapchain: khr::swapchain::Device::new(&instance,&device),
     };
 
     let command_pool_info = vk::CommandPoolCreateInfo {
@@ -271,6 +273,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     //THIS IS THE LAST THING THAT ENDS UP RUNNING IN HERE - AFTER THIS, IT'S OFF TO THE WINDOW EVENT LOOP
     //and once the event loop exits we also exit the actual application
     match event_loop.run_app(&mut App {
+        instance,
         device,
         physical_device: phys_device,
         queue,
@@ -301,6 +304,7 @@ fn main() -> Result<(),Box<dyn Error>> {
 
 pub(crate) struct App {
     #[allow(unused)]
+    instance: Instance,
     device: Device,
     //i *think* there's no way to retrieve the physical device handle from a logical device
     physical_device: vk::PhysicalDevice,
@@ -546,7 +550,7 @@ impl ApplicationHandler for App {
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device.destroy_command_pool(self.command_pool,None);
-            cleanup(INSTANCE,&self.ext,self.debug_messenger,self.debug_reporter,&self.device);
+            cleanup(&self.instance,&self.ext,self.debug_messenger,self.debug_reporter,&self.device);
         }
 
     }
