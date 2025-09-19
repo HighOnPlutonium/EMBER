@@ -9,7 +9,7 @@ edition = "2021"
 ash = { version = "0.38.0", features = ["linked"] }
 winit = "0.30.9"
 libloading = "0.8.6"
-log = { version = "0.4.27", features = ["std"] }
+log = { version = "0.4.27", features = ["std", "kv"] }
 colored = "3.0.0"
 ansi_term = "0.12.1"
 shaderc = "0.9.1"

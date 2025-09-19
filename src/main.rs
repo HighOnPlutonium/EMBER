@@ -4,23 +4,31 @@ mod experimental;
 use std::collections::HashMap;
 use util::per_window::PerWindow;
 
+use crate::experimental::Antistatic;
+use crate::util::helpers::{record_into_buffer, recreate_swapchain};
 use crate::util::logging::{ConsoleLogger, Logged};
-use crate::util::per_window::{WindowBuilder};
+use crate::util::per_window::WindowBuilder;
+use crate::util::swapchain::PerSwapchain;
 use crate::util::windows_ffi::WindowsFFI;
-use ash::{ext, vk};
 use ash::Instance;
+use ash::{ext, vk};
 use ash::{khr, Device, Entry};
 use colored::Colorize;
 use log::{debug, error, info, warn, LevelFilter};
+use once_cell::unsync::Lazy;
+use std::borrow::Cow;
+use std::cell::{LazyCell, OnceCell, UnsafeCell};
 use std::error::Error;
 use std::ffi::{c_char, CStr};
-use std::{env, mem, ptr};
-use std::borrow::Cow;
-use std::cell::{LazyCell, OnceCell};
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
+use std::{env, fmt, mem, ptr, thread};
+use std::time::Duration;
+use ash::vk::PFN_vkAllocateMemory;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
@@ -28,9 +36,6 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::WindowId;
-use once_cell::unsync::Lazy;
-use crate::util::helpers::{record_into_buffer, recreate_swapchain};
-use crate::util::swapchain::PerSwapchain;
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 3;
@@ -48,7 +53,8 @@ const REQUIRED_EXTENSIONS: [&CStr; 1] = [
     khr::surface::NAME,];
 const OPTIONAL_EXTENSIONS: [&CStr; 2] = [
     ext::debug_utils::NAME,
-    ext::debug_report::NAME,];
+    ext::debug_report::NAME,
+];
 const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
     khr::swapchain::NAME,];
 const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 1] = [
@@ -56,99 +62,20 @@ const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 1] = [
 
 static OPT_EXT_LOCK: Mutex<Vec<&CStr>> = Mutex::new(vec![]);
 
+
+
+
+static KHR_SURFACE: LazyLock<khr::surface::Instance> = LazyLock::new(||khr::surface::Instance::new(&*ENTRY,&*INSTANCE));
+
+static          ENTRY:   LazyLock<Entry>            =   LazyLock::new(Entry::linked);
+static DISPLAY_HANDLE: Antistatic<RawDisplayHandle> = Antistatic::new();
+static       INSTANCE: Antistatic<Instance>         = Antistatic::new();
+
+
 static LOGGER: ConsoleLogger = ConsoleLogger;
-
-#[derive(Debug)]
-struct SyncWrapper(RawDisplayHandle);
-unsafe impl Sync for SyncWrapper {}
-
-struct Antistatic<T>(T);
-impl<T> Antistatic<T> {
-    unsafe fn mutate(&self, val: T) {
-        self.0 = val;
-    }
-}
-impl<T> Deref for Antistatic<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &*self.0
-    }
-}
-
-static DISPLAY_HANDLE: SyncWrapper = SyncWrapper(unsafe { mem::zeroed() });
-
-static ENTRY: LazyLock<Entry> = LazyLock::new(Entry::linked);
-
-static INSTANCE: OnceLock<Instance> = OnceLock::new();
-
-
-static DEBUG_UTILS_CREATE_INFO: LazyLock<vk::DebugUtilsMessengerCreateInfoEXT> = LazyLock::new(||vk::DebugUtilsMessengerCreateInfoEXT {
-    message_severity: { type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
-        Flags::VERBOSE
-    },
-    message_type: { type Flags = vk::DebugUtilsMessageTypeFlagsEXT;
-        Flags::GENERAL | Flags::DEVICE_ADDRESS_BINDING | Flags::PERFORMANCE | Flags::VALIDATION
-    },
-    pfn_user_callback: Some(util::logging::debug_callback),
-    p_user_data: ptr::null_mut(),
-    ..Default::default()});
-
-
-fn create_instance() -> Result<Instance, Box<dyn Error>> {
-    let extensions: Vec<*const c_char> = {
-        let mut opt_ext_lock = OPT_EXT_LOCK.lock().unwrap();
-        //(platform-dependent!) extension for surface creation.
-        let mut prerequisite = match &DISPLAY_HANDLE.0 {
-            RawDisplayHandle::Windows(_) => khr::win32_surface::NAME,
-            RawDisplayHandle::Xlib(_) => khr::xlib_surface::NAME,
-            RawDisplayHandle::Xcb(_) => khr::xcb_surface::NAME,
-            RawDisplayHandle::Wayland(_) => khr::wayland_surface::NAME,
-            tmp => { error!("Support for {} is unimplemented",format!("{:?}",tmp).bright_purple()); panic!() }};
-        //when shadowing a variable, it's allowed to own references to the previous binding.
-        let available: Vec<vk::ExtensionProperties> = unsafe { ENTRY.enumerate_instance_extension_properties(None).unwrap() };
-        let available: Vec<&CStr> = available.iter().map(|ext|ext.extension_name_as_c_str().unwrap()).collect();
-        //checking if extensions we want are available, then storing the raw pointers
-        let mut extensions: Vec<*const c_char> = Vec::with_capacity(1+REQUIRED_EXTENSIONS.len()+OPTIONAL_EXTENSIONS.len());
-        if available.contains(&prerequisite) { extensions.push(prerequisite.as_ptr()) }
-        else { error!("Prerequisite extension {} unavailable!", format!("{:?}",prerequisite).bright_purple()); panic!() }
-        for required in REQUIRED_EXTENSIONS { if available.contains(&required) { extensions.push(required.as_ptr()) }
-        else { error!("Required extension {} unavailable!", format!("{:?}",required).bright_purple()); panic!() } }
-        for optional in OPTIONAL_EXTENSIONS { if available.contains(&optional) { extensions.push(optional.as_ptr()) }
-        else {
-            opt_ext_lock.push(optional);
-            error!("Optional extension {} unavailable; Corresponding features {}",format!("{:?}",optional).bright_purple(),"locked".red()) } }
-        extensions
-    };
-
-
-
-    let layers = {
-        //same idea as in the "extensions"-block.
-        let available: Vec<vk::LayerProperties> = unsafe { ENTRY.enumerate_instance_layer_properties()? };
-        let available: Vec<&CStr> = available.iter().map(|layer|layer.layer_name_as_c_str().unwrap()).collect();
-        VALIDATION_LAYERS.iter().filter_map(|layer| {
-            if available.contains(layer) { Some(layer.as_ptr()) }
-            else { warn!("Validation Layer {} is unavailable",format!("{:?}",layer).bright_purple()); None }
-        }).collect::<Vec<*const c_char>>()
-    };
-    let app_info = vk::ApplicationInfo {
-        p_application_name: APPLICATION_TITLE.as_ptr().cast(),
-        api_version: vk::make_api_version(0,1,0,0),
-        ..Default::default()};
-    let create_info = vk::InstanceCreateInfo {
-        p_next: ptr::from_ref(&DEBUG_UTILS_CREATE_INFO).cast(),
-        p_application_info: &app_info,
-        pp_enabled_extension_names: extensions.as_ptr(),
-        enabled_extension_count: extensions.len() as u32,
-        pp_enabled_layer_names: layers.as_ptr(),
-        enabled_layer_count: layers.len() as u32,
-        ..Default::default()};
-
-    Ok(unsafe { ENTRY.create_instance(&create_info, None)? })
-}
-
 fn main() -> Result<(),Box<dyn Error>>
 {
+
     ansi_term::enable_ansi_support().unwrap();
     unsafe { env::set_var("COLORTERM","truecolor"); }
 
@@ -158,28 +85,97 @@ fn main() -> Result<(),Box<dyn Error>>
     let event_loop = EventLoop::new()?;
 
 
-    static VAL: Antistatic<bool> = Antistatic(false);
-    dbg!(&VAL);
-    *VAL = true;
-    dbg!(&VAL);
+    DISPLAY_HANDLE.set(event_loop.display_handle()?.as_raw());
 
-    //i'm sorry
-    println!("before display handle set");
-    unsafe { (ptr::from_ref(&DISPLAY_HANDLE) as *mut SyncWrapper).write(SyncWrapper(event_loop.display_handle()?.as_raw())) };
 
-    println!("before instance set");
-    _ = INSTANCE.set(create_instance()?);
+
+    let debug_utils_create_info = vk::DebugUtilsMessengerCreateInfoEXT {
+        message_severity: {
+            type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
+            Flags::VERBOSE
+        },
+        message_type: {
+            type Flags = vk::DebugUtilsMessageTypeFlagsEXT;
+            Flags::GENERAL | Flags::DEVICE_ADDRESS_BINDING | Flags::PERFORMANCE | Flags::VALIDATION
+        },
+        pfn_user_callback: Some(util::logging::debug_callback),
+        p_user_data: ptr::null_mut(),
+        ..Default::default()};
+
+    let debug_reporter_create_info = vk::DebugReportCallbackCreateInfoEXT {
+        flags: {
+            type Flags = vk::DebugReportFlagsEXT;
+            Flags::INFORMATION | Flags::ERROR  | Flags::DEBUG | Flags::WARNING | Flags::PERFORMANCE_WARNING
+        },
+        pfn_callback: Some(util::logging::debug_reporter),
+        p_user_data: ptr::null_mut(),
+        ..Default::default() };
+
+    let instance = {
+        let extensions: Vec<*const c_char> = {
+            let mut opt_ext_lock = OPT_EXT_LOCK.lock().unwrap();
+            //(platform-dependent!) extension for surface creation.
+            let mut prerequisite = match *DISPLAY_HANDLE {
+                RawDisplayHandle::Windows(_) => khr::win32_surface::NAME,
+                RawDisplayHandle::Xlib(_) => khr::xlib_surface::NAME,
+                RawDisplayHandle::Xcb(_) => khr::xcb_surface::NAME,
+                RawDisplayHandle::Wayland(_) => khr::wayland_surface::NAME,
+                tmp => { error!("Support for {} is unimplemented",format!("{:?}",tmp).bright_purple()); panic!() }};
+            //when shadowing a variable, it's allowed to own references to the previous binding.
+            let available: Vec<vk::ExtensionProperties> = unsafe { ENTRY.enumerate_instance_extension_properties(None).unwrap() };
+            let available: Vec<&CStr> = available.iter().map(|ext|ext.extension_name_as_c_str().unwrap()).collect();
+            //checking if extensions we want are available, then storing the raw pointers
+            let mut extensions: Vec<*const c_char> = Vec::with_capacity(1+REQUIRED_EXTENSIONS.len()+OPTIONAL_EXTENSIONS.len());
+            if available.contains(&prerequisite) { extensions.push(prerequisite.as_ptr()) }
+            else { error!("Prerequisite extension {} unavailable!", format!("{:?}",prerequisite).bright_purple()); panic!() }
+            for required in REQUIRED_EXTENSIONS { if available.contains(&required) { extensions.push(required.as_ptr()) }
+            else { error!("Required extension {} unavailable!", format!("{:?}",required).bright_purple()); panic!() } }
+            for optional in OPTIONAL_EXTENSIONS { if available.contains(&optional) { extensions.push(optional.as_ptr()) }
+            else {
+                opt_ext_lock.push(optional);
+                error!("Optional extension {} unavailable; Corresponding features {}",format!("{:?}",optional).bright_purple(),"locked".red()) } }
+            extensions
+        };
+
+
+
+        let layers = {
+            //same idea as in the "extensions"-block.
+            let available: Vec<vk::LayerProperties> = unsafe { ENTRY.enumerate_instance_layer_properties()? };
+            let available: Vec<&CStr> = available.iter().map(|layer|layer.layer_name_as_c_str().unwrap()).collect();
+            VALIDATION_LAYERS.iter().filter_map(|layer| {
+                if available.contains(layer) { Some(layer.as_ptr()) }
+                else { warn!("Validation Layer {} is unavailable",format!("{:?}",layer).bright_purple()); None }
+            }).collect::<Vec<*const c_char>>()
+        };
+        let app_info = vk::ApplicationInfo {
+            p_application_name: APPLICATION_TITLE.as_ptr().cast(),
+            api_version: vk::make_api_version(0,1,0,0),
+            ..Default::default()};
+        let create_info = vk::InstanceCreateInfo {
+            p_next: ptr::from_ref(&debug_utils_create_info).cast(),
+            p_application_info: &app_info,
+            pp_enabled_extension_names: extensions.as_ptr(),
+            enabled_extension_count: extensions.len() as u32,
+            pp_enabled_layer_names: layers.as_ptr(),
+            enabled_layer_count: layers.len() as u32,
+            ..Default::default()};
+
+        unsafe { ENTRY.create_instance(&create_info, None)? }
+    };
+    INSTANCE.set(instance);
+
 
     let mut opt_device_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     // todo!    MAKE THIS SECTION LESS FUCKING UGLY
     let rated_devices: Vec<(u32,vk::PhysicalDevice,vk::PhysicalDeviceProperties,vk::PhysicalDeviceFeatures,Vec<*const c_char>)> = unsafe {
-        INSTANCE.get_or_init(||create_instance().unwrap()).enumerate_physical_devices()?
+        INSTANCE.enumerate_physical_devices()?
             .iter().filter_map(|device|{
             let mut rating = 0u32;
 
-            let properties = INSTANCE.get_or_init(||create_instance().unwrap()).get_physical_device_properties(*device);
-            let features   = INSTANCE.get_or_init(||create_instance().unwrap()).get_physical_device_features(*device);
-            let available_extensions: Vec<vk::ExtensionProperties> = INSTANCE.get_or_init(||create_instance().unwrap()).enumerate_device_extension_properties(*device).unwrap();
+            let properties = INSTANCE.get_physical_device_properties(*device);
+            let features   = INSTANCE.get_physical_device_features(*device);
+            let available_extensions: Vec<vk::ExtensionProperties> = INSTANCE.enumerate_device_extension_properties(*device).unwrap();
             let available_extensions: Vec<&CStr> = available_extensions.iter().map(|properties|properties.extension_name_as_c_str().unwrap()).collect();
             let mut extensions: Vec<*const c_char> = Vec::with_capacity(
                 REQUIRED_DEVICE_EXTENSIONS.len()+OPTIONAL_DEVICE_EXTENSIONS.len());
@@ -223,7 +219,7 @@ fn main() -> Result<(),Box<dyn Error>>
     // todo!("check for valid queue families during physical device selection")
     // todo!("deal with presentation support and possible dedicated queues per task")
     let queue_family_index = unsafe {
-        let queue_families = INSTANCE.get_or_init(||create_instance().unwrap()).get_physical_device_queue_family_properties(phys_device);
+        let queue_families = INSTANCE.get_physical_device_queue_family_properties(phys_device);
         queue_families.iter().enumerate().filter_map(|(usize,&properties)| {
             properties.queue_flags.contains(vk::QueueFlags::GRAPHICS).then_some(usize)
         }).next().unwrap()} as u32;
@@ -240,38 +236,34 @@ fn main() -> Result<(),Box<dyn Error>>
                 ..Default::default()})};
 
     let device_create_info = vk::DeviceCreateInfo {
-        p_next: if let Some(address_debug_info) = address_debug_info {
-            ptr::from_ref(&address_debug_info).cast() } else { ptr::null() },
+        p_next: if let Some(mut address_debug_info) = address_debug_info {
+            ptr::from_ref(&mut address_debug_info).cast() } else { ptr::null() },
         queue_create_info_count: 1,
         p_queue_create_infos: &device_queue_create_info,
         enabled_extension_count: phys_device_extensions.len() as u32,
         pp_enabled_extension_names: phys_device_extensions.as_ptr(),
         p_enabled_features: &phys_device_features,
         ..Default::default()};
-
-    let device = unsafe { INSTANCE.get_or_init(||create_instance().unwrap()).create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
+    let device = unsafe { INSTANCE.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
-
-
-
 
 
 
     let extension_holder = {
         let opt_ext_lock = OPT_EXT_LOCK.lock().unwrap();
         ExtensionHolder {
-            surface: khr::surface::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap())),
+            surface: khr::surface::Instance::new(&ENTRY,&INSTANCE),
             os_surface: match event_loop.display_handle()?.as_raw() {
-                RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap()))),
-                RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap()))),
-                RawDisplayHandle::Xcb(_)     => OSSurface::XCB(khr::xcb_surface::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap()))),
-                RawDisplayHandle::Xlib(_)    => OSSurface::XLIB(khr::xlib_surface::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap()))),
+                RawDisplayHandle::Windows(_) => OSSurface::WINDOWS(khr::win32_surface::Instance::new(&ENTRY,&INSTANCE)),
+                RawDisplayHandle::Wayland(_) => OSSurface::WAYLAND(khr::wayland_surface::Instance::new(&ENTRY,&INSTANCE)),
+                RawDisplayHandle::Xcb(_)     => OSSurface::XCB(khr::xcb_surface::Instance::new(&ENTRY,&INSTANCE)),
+                RawDisplayHandle::Xlib(_)    => OSSurface::XLIB(khr::xlib_surface::Instance::new(&ENTRY,&INSTANCE)),
                 _ => { unreachable!() }},
             debug_utils: (!opt_ext_lock.contains(&ext::debug_utils::NAME)).then(||
-                ext::debug_utils::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap()))),
+                ext::debug_utils::Instance::new(&ENTRY,&INSTANCE)),
             debug_report: (!opt_ext_lock.contains(&ext::debug_report::NAME)).then(||
-                ext::debug_report::Instance::new(&ENTRY,&INSTANCE.get_or_init(||create_instance().unwrap()))),
-            swapchain: khr::swapchain::Device::new(&INSTANCE.get_or_init(||create_instance().unwrap()),&device),
+                ext::debug_report::Instance::new(&ENTRY,&INSTANCE)),
+            swapchain: khr::swapchain::Device::new(&INSTANCE,&device),
         }};
 
     let command_pool_info = vk::CommandPoolCreateInfo {
@@ -285,19 +277,22 @@ fn main() -> Result<(),Box<dyn Error>>
     //otherwise we put the messenger this Option<> here
     let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
     if let Some(debug_utils) = extension_holder.debug_utils.as_ref() {
-        debug_messenger = match unsafe { debug_utils.create_debug_utils_messenger(&DEBUG_UTILS_CREATE_INFO, None) } {
+        debug_messenger = match unsafe { debug_utils.create_debug_utils_messenger(&debug_utils_create_info, None) } {
             Ok(debug_messenger) => Some(debug_messenger),
             Err(e) => { error!("Debug Messenger creation failed: {:?}; Execution will continue without it.",e); None }
         }}
 
+    let mut debug_reporter: Option<vk::DebugReportCallbackEXT> = None;
+    if let Some(debug_report) = extension_holder.debug_report.as_ref() {
+        debug_reporter = match unsafe { debug_report.create_debug_report_callback(&debug_reporter_create_info, None) } {
+            Ok(debug_reporter) => Some(debug_reporter),
+            Err(e) => { error!("Debug Reporter creation failed: {:?}; Execution will continue without it.",e); None }
+        }}
+
+
 
     info!("Using Device {}",format!("{:?}",phys_device_properties.device_name_as_c_str().unwrap()).bright_purple());
-
-
-    //THIS IS THE LAST THING THAT ENDS UP RUNNING IN HERE - AFTER THIS, IT'S OFF TO THE WINDOW EVENT LOOP
-    //and once the event loop exits we also exit the actual application
     match event_loop.run_app(&mut App {
-        //instance,
         device,
         physical_device: phys_device,
         queue,
@@ -309,6 +304,8 @@ fn main() -> Result<(),Box<dyn Error>>
         win32_fp: None,
 
         debug_messenger,
+        debug_reporter,
+
         current_frame: 0,
     })
     {
@@ -317,17 +314,8 @@ fn main() -> Result<(),Box<dyn Error>>
     }
 }
 
-
-
-
-
-
-
-
-
 pub(crate) struct App {
     #[allow(unused)]
-    //instance: Instance,
     device: Device,
     //i *think* there's no way to retrieve the physical device handle from a logical device
     physical_device: vk::PhysicalDevice,
@@ -337,10 +325,10 @@ pub(crate) struct App {
     windows: HashMap<WindowId,PerWindow>,
 
     ext: ExtensionHolder,
-    #[allow(unused)]
     win32_fp: Option<WindowsFFI>,
 
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    debug_reporter: Option<vk::DebugReportCallbackEXT>,
 
     current_frame: usize,
 }
@@ -353,6 +341,7 @@ struct ExtensionHolder {
     // i guess i'll put device level functions into the same struct as instance level functions?
     swapchain: khr::swapchain::Device,
 }
+
 enum OSSurface {
     WINDOWS(khr::win32_surface::Instance),
     WAYLAND(khr::wayland_surface::Instance),
@@ -362,15 +351,19 @@ enum OSSurface {
 
 
 unsafe fn cleanup(
-    instance: &Instance, ext: &ExtensionHolder,
+    ext: &ExtensionHolder,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    debug_reporter: Option<vk::DebugReportCallbackEXT>,
     device: &Device
 ) {
     if let (Some(debug_utils),Some(debug_messenger)) = (ext.debug_utils.as_ref(),debug_messenger) {
         debug_utils.destroy_debug_utils_messenger(debug_messenger,None);
     }
+    if let (Some(debug_report),Some(debug_reporter)) = (ext.debug_report.as_ref(),debug_reporter) {
+        debug_report.destroy_debug_report_callback(debug_reporter,None);
+    }
     device.destroy_device(None);
-    instance.destroy_instance(None);
+    INSTANCE.destroy_instance(None);
 }
 
 
@@ -568,7 +561,7 @@ impl ApplicationHandler for App {
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device.destroy_command_pool(self.command_pool,None);
-            cleanup(INSTANCE.get().unwrap_unchecked(),&self.ext,self.debug_messenger,&self.device);
+            cleanup(&self.ext,self.debug_messenger,self.debug_reporter,&self.device);
         }
 
     }

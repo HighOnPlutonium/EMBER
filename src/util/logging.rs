@@ -1,10 +1,12 @@
 use std::ffi;
 use std::ffi::CStr;
 use std::fmt::Display;
+use std::os::windows::io::BorrowedHandle;
 use ash::vk;
 use colored::{Color, ColoredString, Colorize};
 
-use log::{debug, error, info, trace, warn, Level, Log, Metadata, Record};
+use log::{debug, error, info, kv, trace, warn, Level, Log, Metadata, Record};
+use log::kv::Key;
 
 pub struct ConsoleLogger;
 
@@ -27,6 +29,7 @@ impl Log for ConsoleLogger {
             ColoredString::from("  "),
             ColoredString::from(":")];
         if target.input == "VULKAN".to_owned() { flavor[2].input = " ".to_owned() }
+
         match record.level() {
             Level::Error => {
                 level.bgcolor  = Some(Color::TrueColor{r:165,g:0,b:0});
@@ -78,13 +81,24 @@ impl Log for ConsoleLogger {
         }
         flavor[3].clear_bgcolor();
 
-        eprintln!("{}{}{}{}{}{} {}",
-                  flavor[0],level,flavor[1],flavor[2],target,flavor[3],args);
+        let subsystem = if let Some(sub) = record.key_values().get(Key::from("sub")) {
+            match sub.to_u64().unwrap(){
+                DBG_UTILS  => "UTILS ",
+                DBG_REPORT => "REPORT",
+                _          => "      "
+            }} else {         "      "};
+
+        eprintln!("{} {}{}{}{}{}{} {}",subsystem.color(Color::White),flavor[0],level,flavor[1],flavor[2],target,flavor[3], args);
     }
 
     fn flush(&self) {
     }
 }
+
+pub const DBG_UTILS: u64  = 1;
+pub const DBG_REPORT: u64 = 2;
+
+
 #[allow(unused)]
 pub(crate) unsafe extern "system" fn  debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -92,17 +106,17 @@ pub(crate) unsafe extern "system" fn  debug_callback(
     callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
     user_data: *mut ffi::c_void)
     -> vk::Bool32 {
-    let message = CStr::from_ptr((*callback_data).p_message).to_str().unwrap();
 
+    let message = CStr::from_ptr((*callback_data).p_message).to_str().unwrap();
     {   type Flags = vk::DebugUtilsMessageSeverityFlagsEXT;
         match severity {
-            Flags::INFO => { info!("info") }
-            Flags::WARNING => { warn!("warning") }
-            Flags::ERROR => { error!("error") }
-            Flags::VERBOSE => { trace!(target:"VULKAN","{:?}: {}",msg_type,message) }
+            Flags::INFO     => {  info!(target:"VULKAN", sub=DBG_UTILS; "info") }
+            Flags::WARNING  => {  warn!(target:"VULKAN", sub=DBG_UTILS; "warning") }
+            Flags::ERROR    => { error!(target:"VULKAN", sub=DBG_UTILS; "error") }
+            Flags::VERBOSE  => { trace!(target:"VULKAN", sub=DBG_UTILS; "{}",message) }
             _ => { trace!("?") }
     }}
-
+    let callback_data = callback_data.read();
     false.into()
 }
 
@@ -118,20 +132,18 @@ pub(crate) unsafe extern "system" fn debug_reporter(
     user_data: *mut ffi::c_void,
 ) -> vk::Bool32 {
 
-    let message = CStr::from_ptr(message);
-
+    let mut message = CStr::from_ptr(message).to_str().unwrap();
+    message = message.trim_matches('"');
     { type Flags = vk::DebugReportFlagsEXT;
         match flags {
-            Flags::PERFORMANCE_WARNING => { warn!(target:"VULKAN","{:?}",message) }
-            Flags::WARNING => { warn!(target:"VULKAN","{:?}",message) }
-            Flags::DEBUG => { debug!(target:"VULKAN","{:?}",message) }
-            Flags::ERROR => { error!(target:"VULKAN","{:?}",message) }
-            Flags::INFORMATION => { info!(target:"VULKAN","{:?}",message) }
+            Flags::PERFORMANCE_WARNING  => {  warn!(target:"VULKAN", sub=DBG_REPORT; "{}",message) }
+            Flags::WARNING              => {  warn!(target:"VULKAN", sub=DBG_REPORT; "{}",message) }
+            Flags::DEBUG                => { debug!(target:"VULKAN", sub=DBG_REPORT; "{}",message) }
+            Flags::ERROR                => { error!(target:"VULKAN", sub=DBG_REPORT; "{}",message) }
+            Flags::INFORMATION          => {  info!(target:"VULKAN", sub=DBG_REPORT; "{}",message) }
             _ => { trace!(target:"VULKAN","??? {:?}",message) }
         }
-
     }
-
     false.into()
 }
 
