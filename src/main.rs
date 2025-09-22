@@ -38,7 +38,7 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHand
 use winit::window::WindowId;
 
 const APPLICATION_TITLE: &str = "EMBER";
-const WINDOW_COUNT: usize = 3;
+const WINDOW_COUNT: usize = 2;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 const VALIDATION_LAYERS: [&CStr;1] = [
