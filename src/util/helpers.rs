@@ -1,11 +1,13 @@
-use std::error::Error;
-use std::ptr;
+use std::mem::offset_of;
+use std::{ptr, slice};
+use std::time::Instant;
 use ash::{khr, vk, Device};
+use ash::vk::{Pipeline, PipelineLayout, PushConstantRange};
+use rand::Fill;
 use shaderc::CompilationArtifact;
-use winit::dpi::PhysicalSize;
 use winit::window::Window;
-use crate::MAX_FRAMES_IN_FLIGHT;
-use crate::util::per_window::{PerWindow, SYN};
+use crate::T_ZERO;
+use crate::util::per_window::PerWindow;
 use crate::util::swapchain::PerSwapchain;
 
 //the bare minimum
@@ -25,6 +27,20 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
 
 
 
+#[derive(Copy, Clone)]
+pub struct Vertex {
+    pos: [f32;3],
+}
+
+pub const VERTICES: [Vertex;4] = [
+    Vertex { pos: [ 1.0,  1.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0, 0.0] },
+    Vertex { pos: [-1.0,  1.0, 0.0] },
+    Vertex { pos: [-1.0, -1.0, 0.0] },
+];
+
+
+
 
 
 
@@ -32,7 +48,7 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
 
 //this func was made due to code starting to be annoying to read in other files and a severe lack of proper error managment.
 //ofc there's no real error management here too. crash and burn, shitheap
-pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Extent2D, render_pass: vk::RenderPass) -> (vk::Pipeline,vk::PipelineLayout) {
+pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Extent2D, render_pass: vk::RenderPass) -> (Pipeline, PipelineLayout, PushConstantRange) {
     let vertex_shader_code = load_shaders(include_str!("../shader/basic.vert"),shaderc::ShaderKind::Vertex);
     let fragment_shader_code = load_shaders(include_str!("../shader/basic.frag"),shaderc::ShaderKind::Fragment);
     let vsm_create_info = vk::ShaderModuleCreateInfo{
@@ -74,12 +90,27 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         dynamic_state_count: dynamic_states.len() as u32,
         p_dynamic_states: dynamic_states.as_ptr(),
         ..Default::default()};
-    //vertices are hardcoded into the vertex shader, so we aint dealing with this stuff here. just some zeroes and nullpointers.
+
+
+    let vertex_binding_descriptions = [
+        vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: size_of::<Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX },
+    ];
+    let vertex_attribute_descriptions = [
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: offset_of!(Vertex, pos) as u32 },
+    ];
+
     let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 0,
-        p_vertex_binding_descriptions: ptr::null(),
-        vertex_attribute_description_count: 0,
-        p_vertex_attribute_descriptions: ptr::null(),
+        vertex_binding_description_count: vertex_binding_descriptions.len() as u32,
+        p_vertex_binding_descriptions: vertex_binding_descriptions.as_ptr(),
+        vertex_attribute_description_count: vertex_attribute_descriptions.len() as u32,
+        p_vertex_attribute_descriptions: vertex_attribute_descriptions.as_ptr(),
         ..Default::default()};
 
     let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo {
@@ -147,12 +178,19 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         p_attachments: &blending_attachment_info,
         blend_constants: [0.0;4],
         ..Default::default()};
-    //we don't need uniforms, yet.
+
+
+    let push_constants_range = vk::PushConstantRange {
+            stage_flags: { type Flags = vk::ShaderStageFlags;
+                Flags::FRAGMENT },
+            offset: 0,
+            size: 16 }; // todo!
+
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo {
         set_layout_count: 0,
         p_set_layouts: ptr::null(),
-        push_constant_range_count: 0,
-        p_push_constant_ranges: ptr::null(),
+        push_constant_range_count: 1,
+        p_push_constant_ranges: ptr::from_ref(&push_constants_range),
         ..Default::default()};
     let pipeline_layout = device.create_pipeline_layout(&pipeline_layout_info,None).unwrap(); //error handling lmao
 
@@ -183,7 +221,7 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
     device.destroy_shader_module(vertex_shader_module,None);
     device.destroy_shader_module(fragment_shader_module,None);
 
-    (*pipeline.first().unwrap(),pipeline_layout)
+    (*pipeline.first().unwrap(),pipeline_layout,push_constants_range)
 }
 
 //render passes tell vulkan what attachments we use as well as any important info regarding those
@@ -253,7 +291,7 @@ pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views
     returnee
 }
 
-pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline, render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D, command_buffer: vk::CommandBuffer, _image_index: u32) {
+pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline, render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D, command_buffer: vk::CommandBuffer, _image_index: u32, vertex_buffer: vk::Buffer, pipeline_layout: vk::PipelineLayout, push_constant_range: vk::PushConstantRange) {
     let begin_info = vk::CommandBufferBeginInfo {
         //flags: vk::CommandBufferUsageFlags,
         p_inheritance_info: ptr::null(),
@@ -273,6 +311,8 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
 
     device.cmd_bind_pipeline(command_buffer,vk::PipelineBindPoint::GRAPHICS,pipeline);
 
+    device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
+
     //because we set the viewport and scissor as dynamic state previously, we gotta set them again.
     let viewport = vk::Viewport {
         x: 0.0, y: 0.0,
@@ -286,7 +326,17 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     device.cmd_set_scissor(command_buffer,0,&[scissor]);
 
 
-    device.cmd_draw(command_buffer,4,1,0,0);
+    let mut data: (f32,f32,f32,f32) = (0.0,0.0,(window.inner_size().width as f32)/(window.inner_size().height as f32),0.0);
+    [data.0,data.1].fill_with(rand::random);
+    data.3 = T_ZERO.elapsed().as_secs_f32();
+    // todo!
+    device.cmd_push_constants(command_buffer, pipeline_layout,
+                              push_constant_range.stage_flags,
+                              push_constant_range.offset,
+                              slice::from_raw_parts(ptr::from_ref(&data) as *const _, size_of_val(&data)));
+
+
+    device.cmd_draw(command_buffer,VERTICES.len() as u32,1,0,0);
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();

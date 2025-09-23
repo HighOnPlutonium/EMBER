@@ -14,7 +14,7 @@ use ash::Instance;
 use ash::{ext, vk};
 use ash::{khr, Device, Entry};
 use colored::Colorize;
-use log::{debug, error, info, warn, LevelFilter};
+use log::{debug, error, info, trace, warn, LevelFilter};
 use once_cell::unsync::Lazy;
 use std::borrow::Cow;
 use std::cell::{LazyCell, OnceCell, UnsafeCell};
@@ -22,23 +22,25 @@ use std::error::Error;
 use std::ffi::{c_char, CStr};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 use std::{env, fmt, mem, ptr, thread};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use ash::vk::PFN_vkAllocateMemory;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
+use winit::event_loop;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::platform::windows::{WindowBorrowExtWindows, WindowExtWindows};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
-use winit::window::WindowId;
+use winit::window::{WindowId, WindowLevel};
 
 const APPLICATION_TITLE: &str = "EMBER";
-const WINDOW_COUNT: usize = 2;
+const WINDOW_COUNT: usize = 1;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 const VALIDATION_LAYERS: [&CStr;1] = [
@@ -67,9 +69,12 @@ static OPT_EXT_LOCK: Mutex<Vec<&CStr>> = Mutex::new(vec![]);
 
 static KHR_SURFACE: LazyLock<khr::surface::Instance> = LazyLock::new(||khr::surface::Instance::new(&*ENTRY,&*INSTANCE));
 
+static T_ZERO: LazyLock<Instant> = LazyLock::new(Instant::now);
+
 static          ENTRY:   LazyLock<Entry>            =   LazyLock::new(Entry::linked);
 static DISPLAY_HANDLE: Antistatic<RawDisplayHandle> = Antistatic::new();
 static       INSTANCE: Antistatic<Instance>         = Antistatic::new();
+
 
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
@@ -83,6 +88,7 @@ fn main() -> Result<(),Box<dyn Error>>
     log::set_max_level(LevelFilter::Trace);
 
     let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(event_loop::ControlFlow::Poll);
 
 
     DISPLAY_HANDLE.set(event_loop.display_handle()?.as_raw());
@@ -306,6 +312,7 @@ fn main() -> Result<(),Box<dyn Error>>
         debug_messenger,
         debug_reporter,
 
+        resized: false,
         current_frame: 0,
     })
     {
@@ -330,6 +337,7 @@ pub(crate) struct App {
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     debug_reporter: Option<vk::DebugReportCallbackEXT>,
 
+    resized: bool,
     current_frame: usize,
 }
 
@@ -421,7 +429,8 @@ impl ApplicationHandler for App {
             render_pass,
             pipeline,
             layout,
-            command_buffers
+            command_buffers,
+            ..
         } = per_window;
 
         match event {
@@ -441,7 +450,7 @@ impl ApplicationHandler for App {
                     "Closing Window with {}",
                     format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple());
 
-                let PerWindow {surface,layout,pipeline,render_pass,swapchain, .. } = self.windows.remove(&window_id).unwrap();
+                let PerWindow {surface,layout,pipeline,render_pass,swapchain,vertex_buffer,vertex_buffer_mem, .. } = self.windows.remove(&window_id).unwrap();
                 unsafe {
                     //VERY IMPORTANT! otherwise, we'd try cleaning up semaphores n stuff while they're still in use
                     self.device.device_wait_idle().unwrap();
@@ -451,6 +460,9 @@ impl ApplicationHandler for App {
 
                     swapchain.cleanup(&self.device, &self.ext.swapchain);
 
+                    self.device.destroy_buffer(vertex_buffer, None);
+                    self.device.free_memory(vertex_buffer_mem, None);
+
                     self.device.destroy_render_pass(render_pass,None);
                     self.ext.surface.destroy_surface(surface,None);
                 }
@@ -459,6 +471,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => {
                 //should probably do some of the swapchain recreation here
                 //although that's left for a later date: todo!
+                self.resized = true;
                 per_window.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -468,8 +481,11 @@ impl ApplicationHandler for App {
                 unsafe { device.wait_for_fences(&[swapchain.sync[self.current_frame].in_flight],true,u64::MAX).unwrap() };
 
                 let next = unsafe {
-                    match ext.swapchain.acquire_next_image(swapchain.handle, u64::MAX, swapchain.sync[self.current_frame].swapchain.clone(), vk::Fence::null()) {
-                        Ok((next,false)) => { next }
+                    let mut result = ext.swapchain.acquire_next_image(swapchain.handle, u64::MAX, swapchain.sync[self.current_frame].swapchain.clone(), vk::Fence::null());
+                    if self.resized { result = Err(vk::Result::ERROR_OUT_OF_DATE_KHR); }
+                    match result {
+                        Ok((next,false)) => {
+                            next }
                         Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                             recreate_swapchain(
                                 &self.device,
@@ -478,7 +494,8 @@ impl ApplicationHandler for App {
                                 &self.ext.surface,
                                 &self.ext.swapchain
                             );
-                            let (next,_) = ext.swapchain.acquire_next_image(per_window.swapchain.handle, u64::MAX, per_window.swapchain.sync[self.current_frame].swapchain, vk::Fence::null()).unwrap();
+                            let (next,is_suboptimal) = ext.swapchain.acquire_next_image(per_window.swapchain.handle, u64::MAX, per_window.swapchain.sync[self.current_frame].swapchain, vk::Fence::null()).unwrap();
+                            self.resized = is_suboptimal;
                             next
                         }
                         Err(e) => { error!("Swapchain recreation failed fatally: {:?}",e); panic!() }   // todo!    EMERGENCY CLEANUP
@@ -493,7 +510,10 @@ impl ApplicationHandler for App {
                     render_pass,
                     pipeline,
                     layout,
-                    command_buffers
+                    command_buffers,
+                    vertex_buffer,
+                    push_constant_range,
+                    ..
                 } = per_window;
 
                 unsafe { device.reset_fences(&[swapchain.sync[self.current_frame].in_flight]).unwrap() };
@@ -501,7 +521,7 @@ impl ApplicationHandler for App {
 
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };
-                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],swapchain.extent,command_buffers[self.current_frame],next) };
+                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],swapchain.extent,command_buffers[self.current_frame],next,*vertex_buffer,*layout,*push_constant_range) };
 
                 window.pre_present_notify();
 
@@ -535,6 +555,8 @@ impl ApplicationHandler for App {
                             &self.ext.surface,
                             &self.ext.swapchain
                         );
+                        println!("recreated swapchain");
+                        per_window.window.request_redraw();
                     }
                     Err(e) => { error!("Swapchain recreation failed fatally: {:?}",e); panic!() }   // todo!    EMERGENCY CLEANUP
                 }};
@@ -551,6 +573,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        thread::sleep(Duration::from_millis(33));
+        self.windows.iter().for_each(|(window_id,per_window)|per_window.window.request_redraw());
     }
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {

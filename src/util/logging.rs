@@ -117,6 +117,7 @@ pub(crate) unsafe extern "system" fn  debug_callback(
             _ => { trace!("?") }
     }}
     let callback_data = callback_data.read();
+
     false.into()
 }
 
@@ -134,6 +135,7 @@ pub(crate) unsafe extern "system" fn debug_reporter(
 
     let mut message = CStr::from_ptr(message).to_str().unwrap();
     message = message.trim_matches('"');
+    let message = format!("[{:?} -> {:x} @ {:x}] {}",object_type,object,location,message);
     { type Flags = vk::DebugReportFlagsEXT;
         match flags {
             Flags::PERFORMANCE_WARNING  => {  warn!(target:"VULKAN", sub=DBG_REPORT; "{}",message) }

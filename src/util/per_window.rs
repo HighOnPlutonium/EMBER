@@ -1,13 +1,14 @@
 use std::error::Error;
 use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 use ash::{vk, Device};
-use log::error;
+use ash::util::Align;
+use log::{debug, error};
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{ExtensionHolder, OSSurface, MAX_FRAMES_IN_FLIGHT};
-use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_views};
+use crate::{ExtensionHolder, OSSurface, INSTANCE, MAX_FRAMES_IN_FLIGHT};
+use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_views, Vertex, VERTICES};
 use crate::util::logging::Logged;
 use crate::util::swapchain::PerSwapchain;
 
@@ -20,6 +21,9 @@ pub struct PerWindow {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     pub command_buffers: Vec<vk::CommandBuffer>,
+    pub vertex_buffer: vk::Buffer,
+    pub vertex_buffer_mem: vk::DeviceMemory,
+    pub push_constant_range: vk::PushConstantRange,
 }
 
 
@@ -129,8 +133,50 @@ impl<'a> WindowBuilder<'a> {
         let views = unsafe { create_views(self.device,&images,format) };
 
         let render_pass = unsafe { create_render_pass(self.device,format) };
-        let (pipeline,layout) = unsafe { create_graphics_pipeline(self.device,extent,render_pass) };
+        let (pipeline,layout,push_constant_range) = unsafe { create_graphics_pipeline(self.device,extent,render_pass) };
         let framebuffers: Vec<vk::Framebuffer> = unsafe { create_framebuffers(self.device,&window,&views,render_pass) };
+
+
+
+        let vertex_buffer_info = vk::BufferCreateInfo {
+            size: (VERTICES.len() * size_of::<Vertex>()) as _,
+            usage: { type Flags = vk::BufferUsageFlags;
+                Flags::VERTEX_BUFFER },
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()};
+
+        let vertex_buffer = unsafe { self.device.create_buffer(&vertex_buffer_info, None).unwrap() };
+
+        let vb_mem_req = unsafe { self.device.get_buffer_memory_requirements(vertex_buffer) };
+
+        let mem_properties = unsafe { INSTANCE.get_physical_device_memory_properties(self.physical_device) };
+
+        let req_flags = { type Flags = vk::MemoryPropertyFlags;
+            Flags::HOST_VISIBLE | Flags::HOST_COHERENT };
+        let mem_idx = mem_properties.memory_types[..mem_properties.memory_type_count as _]
+            .iter().enumerate().find(|(idx,mem_type)|{
+            (1u32 << idx) & vb_mem_req.memory_type_bits != 0
+            && mem_type.property_flags &  req_flags == req_flags
+        }).map(|(idx,mem_type)| idx as _ ).expect("no matching mem type found");
+
+        let vb_allocate_info = vk::MemoryAllocateInfo {
+            allocation_size: vb_mem_req.size,
+            memory_type_index: mem_idx,
+            ..Default::default()};
+
+        let vertex_buffer_mem = unsafe { self.device.allocate_memory( &vb_allocate_info, None).unwrap() };
+
+        let vert_ptr = unsafe { self.device.map_memory(vertex_buffer_mem, 0, vb_mem_req.size, vk::MemoryMapFlags::empty()).unwrap() };
+        let mut vert_align = unsafe { Align::new(
+            vert_ptr,
+            align_of::<Vertex>() as u64,
+            vb_mem_req.size,
+        ) };
+        vert_align.copy_from_slice(&VERTICES);
+        unsafe { self.device.unmap_memory(vertex_buffer_mem) };
+
+        unsafe { self.device.bind_buffer_memory(vertex_buffer, vertex_buffer_mem, 0).unwrap() };
+
 
         let cmd_alloc_info = vk::CommandBufferAllocateInfo {
             command_pool: self.command_pool,
@@ -146,6 +192,9 @@ impl<'a> WindowBuilder<'a> {
             render_pass,
             pipeline, layout,
             command_buffers,
+            vertex_buffer,
+            vertex_buffer_mem,
+            push_constant_range,
         })
     }
 }

@@ -1,5 +1,6 @@
 use std::error::Error;
 use ash::{khr, vk, Device};
+use log::debug;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 use crate::MAX_FRAMES_IN_FLIGHT;
@@ -78,7 +79,7 @@ impl PerSwapchain {
             //queue_family_index_count: ,
             //p_queue_family_indices: ,
             pre_transform: capabilities.current_transform,
-            composite_alpha: vk::CompositeAlphaFlagsKHR::INHERIT, // todo!   INHERIT would be better but for some reason it's causing trouble on my PC (but not my laptop)
+            composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE, // todo!
             present_mode: vk::PresentModeKHR::FIFO,
             //we don't care about obscured pixels (for now)
             clipped: vk::TRUE,
