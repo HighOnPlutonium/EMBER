@@ -22,23 +22,26 @@ float random(vec2 pos) {
         )
         * 43758.5453123);
 }
+
+vec2 _pos(vec2 pos, float res) { return round(pos*res)/res; }
+
 void main() {
     vec2 pos = outPosition.xy * vec2(aspect,1);
-
-    float circle = sin(10*(pow(pos.x,2)+pow(pos.y,2))-2*PI*t);
+    float circle = abs(sin(10*(pow(pos.x,2)+pow(pos.y,2))-2*PI*t));
     vec3 C = vec3(smoothstep(0.99,1,circle));
 
     float d = length(pos);
     float E = 0.001;
     vec2 R1 = vec2(0.0, 0.1);
-    vec2 R2 = vec2(0.2, 1.0);
+    vec2 R2 = vec2(0.9, 1.0);
 
     float limit = abs(2*log(E/(1-E)));
 
     float exponent1 =  ( d - dot(R1,vec2(0.5)) ) / dot(R1,vec2(-1,1));
     float exponent2 =  ( dot(R2,vec2(0.5)) - d ) / dot(R2,vec2(-1,1));
 
-    float brightness = dot(1/(1+exp(-limit*vec2(exponent1,exponent2))),vec2(1))-1;
+    float brightness = clamp(dot(1/(1+exp(-limit*vec2(exponent1,exponent2))),vec2(1))-1,0,1);
+    float mask = C.x*brightness;
 
-    color = vec4(C.x*brightness);
+    color = vec4(vec3((1-mask)*random(pos+t) + mask*random(pos+2*t)),1);
 }
