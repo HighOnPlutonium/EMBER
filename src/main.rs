@@ -35,7 +35,6 @@ use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::platform::windows::{WindowBorrowExtWindows, WindowExtWindows};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{WindowId, WindowLevel};
 
@@ -81,6 +80,7 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 fn main() -> Result<(),Box<dyn Error>>
 {
 
+    #[cfg(windows)]
     ansi_term::enable_ansi_support().unwrap();
     unsafe { env::set_var("COLORTERM","truecolor"); }
 
@@ -400,8 +400,10 @@ impl ApplicationHandler for App {
         (0..window_count).for_each(|idx| {
             builder.attributes.title = format!("{}  #{}",APPLICATION_TITLE,idx+1);
             let (window_id,per_window) = builder.build(event_loop);
+            /*
             let fp = unsafe { WindowsFFI::load_function_pointers() };
             per_window.toggle_blur(&fp);
+            */
             _ = self.windows.insert(window_id,per_window);
         });
 

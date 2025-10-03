@@ -329,6 +329,8 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     let mut data: (f32,f32,f32,f32) = (0.0,0.0,(window.inner_size().width as f32)/(window.inner_size().height as f32),0.0);
     [data.0,data.1].fill_with(rand::random);
     data.3 = T_ZERO.elapsed().as_secs_f32();
+    if (data.3%3.0<1.0) { data.3 = data.3.floor() };
+
     // todo!
     device.cmd_push_constants(command_buffer, pipeline_layout,
                               push_constant_range.stage_flags,

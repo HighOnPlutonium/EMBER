@@ -4,7 +4,6 @@ use ash::{vk, Device};
 use ash::util::Align;
 use log::{debug, error};
 use winit::event_loop::ActiveEventLoop;
-use winit::platform::windows::HWND;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 use crate::{ExtensionHolder, OSSurface, INSTANCE, MAX_FRAMES_IN_FLIGHT};
@@ -12,6 +11,8 @@ use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create
 use crate::util::logging::Logged;
 use crate::util::swapchain::PerSwapchain;
 
+
+type HWND = isize;
 pub struct PerWindow {
     pub window: Window,
     pub surface: vk::SurfaceKHR,

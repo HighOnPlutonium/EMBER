@@ -10,8 +10,8 @@
 
 use libloading::Library;
 use std::os::raw::c_void;
-use winit::platform::windows::HWND;
 
+type HWND = isize;
 
 #[allow(unused)]//quality checks can't see runtime usage
 pub struct WindowsFFI {

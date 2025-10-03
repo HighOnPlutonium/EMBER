@@ -1,7 +1,6 @@
 use std::ffi;
 use std::ffi::CStr;
 use std::fmt::Display;
-use std::os::windows::io::BorrowedHandle;
 use ash::vk;
 use colored::{Color, ColoredString, Colorize};
 
