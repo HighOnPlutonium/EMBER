@@ -1,6 +1,9 @@
 #version 460
 
-const float PI = 3.1415926535;
+#include <lygia/generative/voronoi.glsl>
+
+layout(location = 0) out vec4 color;
+layout(location = 0) in vec3 outPosition;
 
 layout(push_constant) uniform pc {
     vec2 rand;
@@ -8,8 +11,6 @@ layout(push_constant) uniform pc {
     float t;
 };
 
-layout(location = 0) out vec4 color;
-layout(location = 0) in vec3 outPosition;
 
 
 // A single iteration of Bob Jenkins' One-At-A-Time hashing algorithm.
@@ -47,10 +48,10 @@ float floatConstruct( uint m ) {
 
 
 // Pseudo-random value in half-open range [0:1].
-float random( float x ) { return floatConstruct(hash(floatBitsToUint(x))); }
-float random( vec2  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
-float random( vec3  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
-float random( vec4  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float hashRandom( float x ) { return floatConstruct(hash(floatBitsToUint(x))); }
+float hashRandom( vec2  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float hashRandom( vec3  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
+float hashRandom( vec4  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
 
 
 
@@ -61,15 +62,13 @@ void main() {
     float A = 1;
 
 
-    float r1 = random(pos*t);
-    float r2 = random(pos*(floor(t*20)/20));
-    float r3 = random(pos*(floor(t*10)/10));
+    float r1 = hashRandom(pos*t);
+    float r2 = hashRandom(pos*(floor(t*20)/20));
     //float manhattan = abs(pos.x) + abs(pos.y);
     float chebyshev = max(abs(pos.x),abs(pos.y));
-    C = vec3(r1);
-    if ((chebyshev < 0.6) && (chebyshev > 0.5)) C = vec3(r2);
-    if (chebyshev < 0.5) C = vec3(r3);
-    A = 0.5;
+    C = vec3(r2);
+    if (chebyshev < 0.5) C = vec3(r1);
+    A = 1;
 
-    color = vec4(C,A);
+    color = vec4(C*A,A);
 }

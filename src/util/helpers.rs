@@ -1,10 +1,9 @@
 use std::mem::offset_of;
-use std::{ptr, slice};
-use std::time::Instant;
+use std::{fs, ptr, slice};
+use std::fs::DirEntry;
 use ash::{khr, vk, Device};
 use ash::vk::{Pipeline, PipelineLayout, PushConstantRange};
-use rand::Fill;
-use shaderc::CompilationArtifact;
+use shaderc::{CompilationArtifact, IncludeCallbackResult, IncludeType, ResolvedInclude};
 use winit::window::Window;
 use crate::T_ZERO;
 use crate::util::per_window::PerWindow;
@@ -16,10 +15,23 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact 
     let mut options = shaderc::CompileOptions::new().unwrap();
     //specify the entry point - here, it's "main"
     options.add_macro_definition("EP", Some("main"));
+    options.set_include_callback(|file: &str, kind: IncludeType, parent: &str, depth: usize|{
+        let path: String = match kind {
+            IncludeType::Relative => {
+                format!("{parent}/../{file}")
+            }
+            IncludeType::Standard => {
+                format!("src/lib/{file}")
+            }
+        };
+        Ok(ResolvedInclude {
+            resolved_name: path.clone(),
+            content: fs::read_to_string(&path).expect(format!("    {path}\n    ").as_str())
+        })});
     compiler.compile_into_spirv(
         source, kind,
         //those two strings are really just there for (possible) error messages. they don't need to be correct at all.
-        "shader.glsl", "main", Some(&options)).unwrap()
+        "src/shader/SHADER.glsl", "main", Some(&options)).unwrap()
 }
 
 
