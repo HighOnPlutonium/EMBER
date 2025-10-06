@@ -1,8 +1,10 @@
 use std::mem::offset_of;
 use std::{fs, ptr, slice};
+use std::error::Error;
 use std::fs::DirEntry;
 use ash::{khr, vk, Device};
 use ash::vk::{Pipeline, PipelineLayout, PushConstantRange};
+use log::{error, info};
 use shaderc::{CompilationArtifact, IncludeCallbackResult, IncludeType, ResolvedInclude};
 use winit::window::Window;
 use crate::T_ZERO;
@@ -10,28 +12,37 @@ use crate::util::per_window::PerWindow;
 use crate::util::swapchain::PerSwapchain;
 
 //the bare minimum
-fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> CompilationArtifact {
-    let compiler = shaderc::Compiler::new().unwrap();
-    let mut options = shaderc::CompileOptions::new().unwrap();
+fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> shaderc::Result<CompilationArtifact> {
+    let compiler = shaderc::Compiler::new()?;
+    let mut options = shaderc::CompileOptions::new()?;
     //specify the entry point - here, it's "main"
     options.add_macro_definition("EP", Some("main"));
-    options.set_include_callback(|file: &str, kind: IncludeType, parent: &str, depth: usize|{
+    options.set_include_callback(|file: &str, kind: IncludeType, parent: &str, _depth: usize|{
+        let parent_dir = parent.rsplit_once('/').unwrap_or(("/","")).0;
         let path: String = match kind {
             IncludeType::Relative => {
-                format!("{parent}/../{file}")
+                format!("{parent_dir}/{file}")
             }
             IncludeType::Standard => {
                 format!("src/lib/{file}")
             }
         };
+        let file: String = match fs::read_to_string(&path) {
+            Ok(file) => {
+                info!("Loading {path} as dependency of {parent}");
+                file },
+            Err(e) => {
+                error!("Failure building shader: {e}");
+                return Err(format!("{e}"))
+            }
+        };
         Ok(ResolvedInclude {
-            resolved_name: path.clone(),
-            content: fs::read_to_string(&path).expect(format!("    {path}\n    ").as_str())
+            resolved_name: path,
+            content: file
         })});
     compiler.compile_into_spirv(
         source, kind,
-        //those two strings are really just there for (possible) error messages. they don't need to be correct at all.
-        "src/shader/SHADER.glsl", "main", Some(&options)).unwrap()
+        "src/shader/SHADER.glsl", "main", Some(&options))
 }
 
 
@@ -61,8 +72,8 @@ pub const VERTICES: [Vertex;4] = [
 //this func was made due to code starting to be annoying to read in other files and a severe lack of proper error managment.
 //ofc there's no real error management here too. crash and burn, shitheap
 pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Extent2D, render_pass: vk::RenderPass) -> (Pipeline, PipelineLayout, PushConstantRange) {
-    let vertex_shader_code = load_shaders(include_str!("../shader/basic.vert"),shaderc::ShaderKind::Vertex);
-    let fragment_shader_code = load_shaders(include_str!("../shader/basic.frag"),shaderc::ShaderKind::Fragment);
+    let vertex_shader_code = load_shaders(include_str!("../shader/basic.vert"),shaderc::ShaderKind::Vertex).unwrap();
+    let fragment_shader_code = load_shaders(include_str!("../shader/basic.frag"),shaderc::ShaderKind::Fragment).unwrap();
     let vsm_create_info = vk::ShaderModuleCreateInfo{
         //VERY IMPORTANT: the codesize is measured in BYTES.
         //however, the pointer to the code should be a *const u32 - a raw pointer to a 32bit unsigned integer
