@@ -75,7 +75,9 @@ impl Log for ConsoleLogger {
                     flavor.fgcolor = Some(Color::TrueColor{r:205,g:205,b:205});
                     flavor.bgcolor = level.bgcolor;
                 });
-
+                if "calloop" == target.input.split_once("::").unwrap_or(("","")).0 {
+                    return;
+                }
             }
         }
         flavor[3].clear_bgcolor();
@@ -115,7 +117,6 @@ pub(crate) unsafe extern "system" fn  debug_callback(
             Flags::VERBOSE  => { trace!(target:"VULKAN", sub=DBG_UTILS; "{}",message) }
             _ => { trace!("?") }
     }}
-    let callback_data = callback_data.read();
 
     false.into()
 }

@@ -10,6 +10,7 @@ use crate::util::logging::{ConsoleLogger, Logged};
 use crate::util::per_window::WindowBuilder;
 use crate::util::swapchain::PerSwapchain;
 use crate::util::windows_ffi::WindowsFFI;
+use ash::vk::{Handle, PFN_vkAllocateMemory};
 use ash::Instance;
 use ash::{ext, vk};
 use ash::{khr, Device, Entry};
@@ -20,15 +21,16 @@ use std::borrow::Cow;
 use std::cell::{LazyCell, OnceCell, UnsafeCell};
 use std::error::Error;
 use std::ffi::{c_char, CStr};
+use std::io::Read;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{ControlFlow, Deref};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
-use std::{env, fmt, mem, ptr, thread};
 use std::time::{Duration, Instant, SystemTime};
-use ash::vk::PFN_vkAllocateMemory;
+use std::{env, fmt, fs, mem, ptr, thread};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
@@ -52,14 +54,23 @@ const VALIDATION_LAYERS: [&CStr;1] = [
 ];
 const REQUIRED_EXTENSIONS: [&CStr; 1] = [
     khr::surface::NAME,];
-const OPTIONAL_EXTENSIONS: [&CStr; 2] = [
+const OPTIONAL_EXTENSIONS: [&CStr; 6] = [
     ext::debug_utils::NAME,
     ext::debug_report::NAME,
+
+    ext::direct_mode_display::NAME,
+    ext::acquire_drm_display::NAME,
+
+    ext::external_memory_dma_buf::NAME,
+    khr::external_memory_capabilities::NAME,
 ];
 const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
     khr::swapchain::NAME,];
-const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 1] = [
-    ext::device_address_binding_report::NAME,];
+const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 3] = [
+    ext::device_address_binding_report::NAME,
+    khr::external_memory_fd::NAME,
+    khr::external_memory::NAME,
+];
 
 static OPT_EXT_LOCK: Mutex<Vec<&CStr>> = Mutex::new(vec![]);
 
@@ -270,6 +281,14 @@ fn main() -> Result<(),Box<dyn Error>>
             debug_report: (!opt_ext_lock.contains(&ext::debug_report::NAME)).then(||
                 ext::debug_report::Instance::new(&ENTRY,&INSTANCE)),
             swapchain: khr::swapchain::Device::new(&INSTANCE,&device),
+            direct_mode: (!opt_ext_lock.contains(&ext::direct_mode_display::NAME)).then(||
+                ext::direct_mode_display::Instance::new(&ENTRY,&INSTANCE)),
+            linux_drm: (!opt_ext_lock.contains(&ext::acquire_drm_display::NAME)).then(||
+                ext::acquire_drm_display::Instance::new(&ENTRY,&INSTANCE)),
+            extmem_fd: (!opt_ext_lock.contains(&khr::external_memory_fd::NAME)).then(||
+                khr::external_memory_fd::Device::new(&INSTANCE,&device)),
+            extmem_caps: (!opt_ext_lock.contains(&khr::external_memory_capabilities::NAME)).then(||
+                khr::external_memory_capabilities::Instance::new(&ENTRY,&INSTANCE)),
         }};
 
     let command_pool_info = vk::CommandPoolCreateInfo {
@@ -296,6 +315,46 @@ fn main() -> Result<(),Box<dyn Error>>
         }}
 
 
+    if let (Some(direct_mode),Some(linux_drm),Some(extmem_fd))
+        = (extension_holder.direct_mode.as_ref(),extension_holder.linux_drm.as_ref(),extension_holder.extmem_fd.as_ref())
+    {
+        let dri = fs::File::open("/dev/dri/card1").unwrap();
+        let resources = drm::drm_mode::get_resources(dri.as_raw_fd()).unwrap();
+        let mut connectors: Vec<drm::drm_mode::Connector> = Vec::with_capacity(resources.get_count_connectors() as usize);
+
+        resources.get_connectors().iter().for_each(|id|{
+            connectors.push(drm::drm_mode::get_connector(dri.as_raw_fd(),*id).unwrap());
+        });
+
+        dbg!(&connectors);
+
+        let ccon = connectors.iter().find(|&connector|{ connector.get_connection() == drm::drm_mode::Connection::Connected }).unwrap();
+        dbg!(&ccon);
+
+        let mut props =  vk::MemoryFdPropertiesKHR::default();
+        unsafe { extmem_fd.get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, dri.as_raw_fd(), &mut props).unwrap() };
+        dbg!(&props);
+        let mem_types = unsafe { INSTANCE.get_physical_device_memory_properties(phys_device).memory_types };
+        dbg!(mem_types);
+        let memtype = mem_types.iter().find(|&mem|{
+            mem.property_flags.as_raw() == (props.memory_type_bits as _)
+        }).unwrap();
+        let alloc_info = vk::MemoryAllocateInfo {
+            allocation_size: 1920*1080*4,
+            memory_type_index: ,
+            ..Default::default()};
+        let mem = unsafe { device.allocate_memory(&alloc_info,None).unwrap() };
+        let info = vk::MemoryGetFdInfoKHR {
+            memory: vk::DeviceMemory::null(),
+            handle_type: {
+                type Flags = vk::ExternalMemoryHandleTypeFlags;
+                Flags::DMA_BUF_EXT },
+            ..Default::default()};
+        unsafe{ extmem_fd.get_memory_fd(&info).unwrap() };
+
+        //let display = unsafe { linux_drm.get_drm_display(phys_device,dri.as_raw_fd(),ccon.get_connector_id()).unwrap() };
+        //unsafe { linux_drm.acquire_drm_display(phys_device,dri.as_raw_fd(),display) }.unwrap();
+    }
 
     info!("Using Device {}",format!("{:?}",phys_device_properties.device_name_as_c_str().unwrap()).bright_purple());
     match event_loop.run_app(&mut App {
@@ -348,6 +407,12 @@ struct ExtensionHolder {
     debug_report: Option<ext::debug_report::Instance>,
     // i guess i'll put device level functions into the same struct as instance level functions?
     swapchain: khr::swapchain::Device,
+
+    direct_mode: Option<ext::direct_mode_display::Instance>,
+    linux_drm: Option<ext::acquire_drm_display::Instance>,
+
+    extmem_fd: Option<khr::external_memory_fd::Device>,
+    extmem_caps: Option<khr::external_memory_capabilities::Instance>,
 }
 
 enum OSSurface {
