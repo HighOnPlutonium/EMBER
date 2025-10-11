@@ -3,11 +3,11 @@ use std::{fs, ptr, slice};
 use std::error::Error;
 use std::fs::DirEntry;
 use ash::{khr, vk, Device};
-use ash::vk::{Pipeline, PipelineLayout, PushConstantRange};
+use ash::vk::{DescriptorPool, DescriptorSetLayout, Pipeline, PipelineLayout, PushConstantRange};
 use log::{error, info};
 use shaderc::{CompilationArtifact, IncludeCallbackResult, IncludeType, ResolvedInclude};
 use winit::window::Window;
-use crate::T_ZERO;
+use crate::{UniformBufferObject, MAX_FRAMES_IN_FLIGHT, T_ZERO};
 use crate::util::per_window::PerWindow;
 use crate::util::swapchain::PerSwapchain;
 
@@ -71,7 +71,7 @@ pub const VERTICES: [Vertex;4] = [
 
 //this func was made due to code starting to be annoying to read in other files and a severe lack of proper error managment.
 //ofc there's no real error management here too. crash and burn, shitheap
-pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Extent2D, render_pass: vk::RenderPass) -> (Pipeline, PipelineLayout, PushConstantRange) {
+pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Extent2D, render_pass: vk::RenderPass) -> (Pipeline, PipelineLayout, PushConstantRange, DescriptorSetLayout, DescriptorPool) {
     let vertex_shader_code = load_shaders(include_str!("../shader/basic.vert"),shaderc::ShaderKind::Vertex).unwrap();
     let fragment_shader_code = load_shaders(include_str!("../shader/basic.frag"),shaderc::ShaderKind::Fragment).unwrap();
     let vsm_create_info = vk::ShaderModuleCreateInfo{
@@ -169,7 +169,8 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         depth_clamp_enable: vk::FALSE,
         rasterizer_discard_enable: vk::FALSE,
         polygon_mode: vk::PolygonMode::FILL,
-        cull_mode: vk::CullModeFlags::NONE,
+        cull_mode: vk::CullModeFlags::BACK,
+        front_face: vk::FrontFace::COUNTER_CLOCKWISE,
         depth_bias_enable: vk::FALSE, //don't properly understand + don't need to, YET
         line_width: 1.0,
         ..Default::default()};
@@ -203,15 +204,61 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         ..Default::default()};
 
 
+    let pool_size_ubo = vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::UNIFORM_BUFFER,
+        descriptor_count: MAX_FRAMES_IN_FLIGHT,
+    };
+    let pool_size_img = vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        descriptor_count: MAX_FRAMES_IN_FLIGHT,
+    };
+    let pool_size: Vec<vk::DescriptorPoolSize> = vec![pool_size_ubo,pool_size_img];
+    let pool_info = vk::DescriptorPoolCreateInfo {
+        flags: vk::DescriptorPoolCreateFlags::default(),
+        max_sets: MAX_FRAMES_IN_FLIGHT,
+        pool_size_count: 2,
+        p_pool_sizes: ptr::from_ref(&pool_size).cast(),
+        ..Default::default()};
+    let descriptor_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
+
+
     let push_constants_range = vk::PushConstantRange {
             stage_flags: { type Flags = vk::ShaderStageFlags;
                 Flags::FRAGMENT },
             offset: 0,
             size: 16 }; // todo!
 
+    let sampler_layout_binding = vk::DescriptorSetLayoutBinding {
+        binding: 1,
+        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        descriptor_count: 1,
+        stage_flags: vk::ShaderStageFlags::FRAGMENT,
+        p_immutable_samplers: ptr::null(),
+        ..Default::default()};
+
+    let ubo_layout_binding = vk::DescriptorSetLayoutBinding {
+        binding: 0,
+        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+        descriptor_count: 1,
+        stage_flags: vk::ShaderStageFlags::VERTEX,
+        ..Default::default()};
+
+    let bindings: Vec<vk::DescriptorSetLayoutBinding> = vec![ubo_layout_binding, sampler_layout_binding];
+
+    let descriptor_set_layout_info = vk::DescriptorSetLayoutCreateInfo {
+        //flags: vk::DescriptorSetLayoutCreateFlags::DESCRIPTOR_BUFFER_EXT,
+        binding_count: bindings.len() as u32,
+        p_bindings: bindings.as_ptr(),
+        ..Default::default()};
+
+    let descriptor_set_layout = device.create_descriptor_set_layout(&descriptor_set_layout_info, None).unwrap();
+
+
+
+
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo {
-        set_layout_count: 0,
-        p_set_layouts: ptr::null(),
+        set_layout_count: 1,
+        p_set_layouts: &descriptor_set_layout,
         push_constant_range_count: 1,
         p_push_constant_ranges: ptr::from_ref(&push_constants_range),
         ..Default::default()};
@@ -244,7 +291,7 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
     device.destroy_shader_module(vertex_shader_module,None);
     device.destroy_shader_module(fragment_shader_module,None);
 
-    (*pipeline.first().unwrap(),pipeline_layout,push_constants_range)
+    (*pipeline.first().unwrap(),pipeline_layout,push_constants_range,descriptor_set_layout, descriptor_pool)
 }
 
 //render passes tell vulkan what attachments we use as well as any important info regarding those
@@ -314,7 +361,10 @@ pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views
     returnee
 }
 
-pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline, render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D, command_buffer: vk::CommandBuffer, _image_index: u32, vertex_buffer: vk::Buffer, pipeline_layout: vk::PipelineLayout, push_constant_range: vk::PushConstantRange) {
+pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline,
+                                        render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D,
+                                        command_buffer: vk::CommandBuffer, image_index: u32, vertex_buffer: vk::Buffer, pipeline_layout: vk::PipelineLayout,
+                                        push_constant_range: vk::PushConstantRange, screen_cast: vk::Image, descriptor_sets: Vec<vk::DescriptorSet>) {
     let begin_info = vk::CommandBufferBeginInfo {
         //flags: vk::CommandBufferUsageFlags,
         p_inheritance_info: ptr::null(),
@@ -347,6 +397,10 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
 
     let scissor = vk::Rect2D::from(extent);
     device.cmd_set_scissor(command_buffer,0,&[scissor]);
+
+
+    device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, &[descriptor_sets[image_index as usize]], &[]);
+
 
 
     let mut data: (f32,f32,f32,f32) = (0.0,0.0,(window.inner_size().width as f32)/(window.inner_size().height as f32),0.0);

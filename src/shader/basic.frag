@@ -5,6 +5,9 @@
 layout(location = 0) out vec4 color;
 layout(location = 0) in vec3 outPosition;
 
+
+layout(binding = 1) uniform sampler2D tex;
+
 layout(push_constant) uniform pc {
     vec2 rand;
     float aspect;
@@ -61,6 +64,8 @@ void main() {
     vec3 C = vec3(0);
     float A = 1;
 
+
+    color = texture(tex, outPosition);
 
     float r1 = hashRandom(pos*t);
     float r2 = hashRandom(pos*(floor(t*20)/20));

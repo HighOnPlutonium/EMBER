@@ -1,3 +1,5 @@
+extern crate core;
+
 mod util;
 mod experimental;
 
@@ -20,17 +22,21 @@ use once_cell::unsync::Lazy;
 use std::borrow::Cow;
 use std::cell::{LazyCell, OnceCell, UnsafeCell};
 use std::error::Error;
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::io::Read;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{ControlFlow, Deref};
-use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
-use std::{env, fmt, fs, mem, ptr, thread};
+use std::{env, fmt, fs, mem, ptr, slice, thread};
+use drm::ffi::xf86drm::drmMap;
+use pipewire::properties::properties;
+use pipewire::spa::pod::FixedSizedPod;
+use portal_screencast_waycap::ScreenCastStream;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
@@ -54,22 +60,23 @@ const VALIDATION_LAYERS: [&CStr;1] = [
 ];
 const REQUIRED_EXTENSIONS: [&CStr; 1] = [
     khr::surface::NAME,];
-const OPTIONAL_EXTENSIONS: [&CStr; 6] = [
+const OPTIONAL_EXTENSIONS: [&CStr; 5] = [
     ext::debug_utils::NAME,
     ext::debug_report::NAME,
 
     ext::direct_mode_display::NAME,
     ext::acquire_drm_display::NAME,
 
-    ext::external_memory_dma_buf::NAME,
     khr::external_memory_capabilities::NAME,
 ];
 const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
     khr::swapchain::NAME,];
-const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 3] = [
+const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 4] = [
     ext::device_address_binding_report::NAME,
     khr::external_memory_fd::NAME,
     khr::external_memory::NAME,
+    ext::external_memory_dma_buf::NAME,
+
 ];
 
 static OPT_EXT_LOCK: Mutex<Vec<&CStr>> = Mutex::new(vec![]);
@@ -230,7 +237,7 @@ fn main() -> Result<(),Box<dyn Error>>
             }})};
 
     #[allow(unused)]
-    let Some((&phys_device,&phys_device_properties,&phys_device_features,phys_device_extensions)) = device_opt
+    let Some((&phys_device,&phys_device_properties,phys_device_features,phys_device_extensions)) = device_opt
         else { error!("No suitable device found!"); panic!()  };
 
     // todo!("check for valid queue families during physical device selection")
@@ -252,6 +259,8 @@ fn main() -> Result<(),Box<dyn Error>>
                 report_address_binding: vk::TRUE,
                 ..Default::default()})};
 
+    let device_features = phys_device_features.clone().sampler_anisotropy(true);
+
     let device_create_info = vk::DeviceCreateInfo {
         p_next: if let Some(mut address_debug_info) = address_debug_info {
             ptr::from_ref(&mut address_debug_info).cast() } else { ptr::null() },
@@ -259,8 +268,9 @@ fn main() -> Result<(),Box<dyn Error>>
         p_queue_create_infos: &device_queue_create_info,
         enabled_extension_count: phys_device_extensions.len() as u32,
         pp_enabled_extension_names: phys_device_extensions.as_ptr(),
-        p_enabled_features: &phys_device_features,
+        p_enabled_features: &device_features,
         ..Default::default()};
+    info!("Creating logical device over physical device {}",phys_device_properties.device_name_as_c_str()?.to_str()?.bright_purple());
     let device = unsafe { INSTANCE.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
@@ -315,46 +325,199 @@ fn main() -> Result<(),Box<dyn Error>>
         }}
 
 
+
+    let mut holder = SCHolder::default();
+
     if let (Some(direct_mode),Some(linux_drm),Some(extmem_fd))
         = (extension_holder.direct_mode.as_ref(),extension_holder.linux_drm.as_ref(),extension_holder.extmem_fd.as_ref())
-    {
-        let dri = fs::File::open("/dev/dri/card1").unwrap();
-        let resources = drm::drm_mode::get_resources(dri.as_raw_fd()).unwrap();
-        let mut connectors: Vec<drm::drm_mode::Connector> = Vec::with_capacity(resources.get_count_connectors() as usize);
+    { unsafe {
+        use portal_screencast_waycap::*;
+        use pipewire as pw;
 
-        resources.get_connectors().iter().for_each(|id|{
-            connectors.push(drm::drm_mode::get_connector(dri.as_raw_fd(),*id).unwrap());
-        });
+        let mut screen_cast = ScreenCast::new()?;
+        let screen_cast = screen_cast.start(None)?;
 
-        dbg!(&connectors);
+        let fd = screen_cast.pipewire_fd();
+        let streams: Vec<&ScreenCastStream> = screen_cast.streams().collect();
+        dbg!(&fd);
+        dbg!(&streams);
+        let tmp_stream = streams[0];
 
-        let ccon = connectors.iter().find(|&connector|{ connector.get_connection() == drm::drm_mode::Connection::Connected }).unwrap();
-        dbg!(&ccon);
+        let pw_loop = pw::main_loop::MainLoopBox::new(None).unwrap();
+        let context = pw::context::ContextBox::new(&pw_loop.loop_(), None).unwrap();
+        let core = context.connect_fd(OwnedFd::from_raw_fd(fd), None).unwrap();
+        let props =  pw::properties::PropertiesBox::default();
+        let stream = pw::stream::StreamBox::new(&core, "screen-capture", props).unwrap();
 
-        let mut props =  vk::MemoryFdPropertiesKHR::default();
-        unsafe { extmem_fd.get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, dri.as_raw_fd(), &mut props).unwrap() };
-        dbg!(&props);
-        let mem_types = unsafe { INSTANCE.get_physical_device_memory_properties(phys_device).memory_types };
-        dbg!(mem_types);
-        let memtype = mem_types.iter().find(|&mem|{
-            mem.property_flags.as_raw() == (props.memory_type_bits as _)
-        }).unwrap();
-        let alloc_info = vk::MemoryAllocateInfo {
-            allocation_size: 1920*1080*4,
-            memory_type_index: ,
+        let streamflags = {
+            type Flags = pw::stream::StreamFlags;
+            Flags::INACTIVE };
+
+        let pod = { pw::spa::pod::object!(
+            pw::spa::utils::SpaTypes::ObjectParamFormat,
+            pw::spa::param::ParamType::EnumFormat,
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaType,
+                Id,
+                pw::spa::param::format::MediaType::Video
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaSubtype,
+                Id,
+                pw::spa::param::format::MediaSubtype::Raw
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoModifier,
+                Long,
+                0
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                pw::spa::param::video::VideoFormat::NV12,
+                pw::spa::param::video::VideoFormat::I420,
+                pw::spa::param::video::VideoFormat::BGRA,
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoSize,
+                Choice,
+                Range,
+                Rectangle,
+                pw::spa::utils::Rectangle {
+                    width: 2560,
+                    height: 1440
+                }, // Default
+                pw::spa::utils::Rectangle {
+                    width: 1,
+                    height: 1
+                }, // Min
+                pw::spa::utils::Rectangle {
+                    width: 4096,
+                    height: 4096
+                } // Max
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFramerate,
+                Choice,
+                Range,
+                Fraction,
+                pw::spa::utils::Fraction { num: 240, denom: 1 }, // Default
+                pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
+                pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
+            ),
+        )
+        };
+
+        let video_spa_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &pw::spa::pod::Value::Object(pod),
+        ).unwrap().0.into_inner();
+
+        let mut video_params = [pw::spa::pod::Pod::from_bytes(&video_spa_values).unwrap()];
+        let listener = stream.add_local_listener::<()>()
+            .drained(|_,_|{println!("drained")})
+            .add_buffer(|_,_,_|{
+                println!("add_buffer")
+            })
+            .process(|_,_|{println!("process")})
+            .param_changed(|stream, _, id, pod|{
+                println!("param_changed")
+            });
+        let listener = listener.register().unwrap();
+        stream.connect(pipewire::spa::utils::Direction::Input, Some(tmp_stream.pipewire_node()), streamflags, &mut video_params).unwrap();
+
+
+        while (stream.state() == pw::stream::StreamState::Connecting) {
+            println!("Connecting");
+            thread::sleep(Duration::from_millis(500));
+        }
+
+
+
+        let mut buf = stream.dequeue_buffer().unwrap();
+        let fd = buf.datas_mut()[0].fd();
+
+        let mem_import_info = vk::ImportMemoryFdInfoKHR {
+            handle_type: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+            fd: fd as i32,
             ..Default::default()};
-        let mem = unsafe { device.allocate_memory(&alloc_info,None).unwrap() };
-        let info = vk::MemoryGetFdInfoKHR {
-            memory: vk::DeviceMemory::null(),
-            handle_type: {
-                type Flags = vk::ExternalMemoryHandleTypeFlags;
-                Flags::DMA_BUF_EXT },
+        let mem_alloc_info = vk::MemoryAllocateInfo {
+            p_next: ptr::from_ref(&mem_import_info).cast(),
+            allocation_size: 1920*1200*4,
+            memory_type_index: 0,
             ..Default::default()};
-        unsafe{ extmem_fd.get_memory_fd(&info).unwrap() };
+        let mem = device.allocate_memory(&mem_alloc_info, None)?;
 
-        //let display = unsafe { linux_drm.get_drm_display(phys_device,dri.as_raw_fd(),ccon.get_connector_id()).unwrap() };
-        //unsafe { linux_drm.acquire_drm_display(phys_device,dri.as_raw_fd(),display) }.unwrap();
-    }
+        let ext_img_info = vk::ExternalMemoryImageCreateInfo {
+            handle_types: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+            ..Default::default()};
+        let img_info = vk::ImageCreateInfo {
+            p_next: ptr::from_ref(&ext_img_info).cast(),
+            flags: {
+                type Flags = vk::ImageCreateFlags;
+                Flags::default()
+            },
+            image_type: vk::ImageType::TYPE_2D,
+            format: vk::Format::R8G8B8A8_SNORM,
+            extent: vk::Extent3D { width: 1920, height: 1200, depth: 1 },
+            mip_levels: 0,
+            array_layers: 0,
+            samples: vk::SampleCountFlags::default(),
+            tiling: vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
+            usage: {
+                type Flags = vk::ImageUsageFlags;
+                Flags::SAMPLED
+            },
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            initial_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ..Default::default()};
+        let img = device.create_image(&img_info, None)?;
+
+        device.bind_image_memory(img, mem, 0)?;
+
+        let view_info = vk::ImageViewCreateInfo {
+            flags: vk::ImageViewCreateFlags::default(),
+            image: img,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format: img_info.format,
+            components: vk::ComponentMapping::default(),
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            ..Default::default()};
+        let view = device.create_image_view(&view_info, None)?;
+
+        let sampler_info = vk::SamplerCreateInfo {
+            flags: vk::SamplerCreateFlags::default(),
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+            mipmap_mode: vk::SamplerMipmapMode::NEAREST,
+            address_mode_u: vk::SamplerAddressMode::CLAMP_TO_BORDER,
+            address_mode_v: vk::SamplerAddressMode::CLAMP_TO_BORDER,
+            address_mode_w: vk::SamplerAddressMode::CLAMP_TO_BORDER,
+            mip_lod_bias: 0.0,
+            anisotropy_enable: vk::TRUE,
+            max_anisotropy: 4f32.min(INSTANCE.get_physical_device_properties(phys_device).limits.max_sampler_anisotropy),
+            compare_enable: vk::FALSE,
+            compare_op: vk::CompareOp::ALWAYS,
+            min_lod: 0.0,
+            max_lod: 0.0,
+            border_color: vk::BorderColor::FLOAT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+            ..Default::default()};
+        let sampler = device.create_sampler(&sampler_info, None)?;
+
+        holder.mem = mem;
+        holder.img = img;
+        holder.view = view;
+        holder.sampler = sampler;
+    }}
 
     info!("Using Device {}",format!("{:?}",phys_device_properties.device_name_as_c_str().unwrap()).bright_purple());
     match event_loop.run_app(&mut App {
@@ -373,13 +536,21 @@ fn main() -> Result<(),Box<dyn Error>>
 
         resized: false,
         current_frame: 0,
+
+        screencast: Some(holder),
     })
     {
         Ok(_) => Ok(()),
         Err(e) => Err(Box::new(e))
     }
 }
-
+#[derive(Default)]
+struct SCHolder {
+    mem: vk::DeviceMemory,
+    img: vk::Image,
+    view: vk::ImageView,
+    sampler: vk::Sampler,
+}
 pub(crate) struct App {
     #[allow(unused)]
     device: Device,
@@ -398,6 +569,8 @@ pub(crate) struct App {
 
     resized: bool,
     current_frame: usize,
+
+    screencast: Option<SCHolder>,
 }
 
 struct ExtensionHolder {
@@ -440,7 +613,11 @@ unsafe fn cleanup(
 }
 
 
-
+struct UniformBufferObject {
+    model: [[f32;4];4],
+    view: [[f32;4];4],
+    proj: [[f32;4];4],
+}
 
 
 #[allow(unused)]
@@ -464,7 +641,7 @@ impl ApplicationHandler for App {
 
         (0..window_count).for_each(|idx| {
             builder.attributes.title = format!("{}  #{}",APPLICATION_TITLE,idx+1);
-            let (window_id,per_window) = builder.build(event_loop);
+            let (window_id,per_window) = builder.build(event_loop, self.screencast.as_ref());
             /*
             let fp = unsafe { WindowsFFI::load_function_pointers() };
             per_window.toggle_blur(&fp);
@@ -477,7 +654,7 @@ impl ApplicationHandler for App {
             debug!("THE LARGE AMOUNT OF WINDOWS IS INTENTIONAL.");
             info!("by the way, that above was on \"{}\" due to the color being highly visible, not because of it being debugging-related.","DEBUG".bright_cyan());
             builder.attributes.title = "yes, this is intentional".to_owned();
-            let (window_id,per_window) = builder.build(event_loop);
+            let (window_id,per_window) = builder.build(event_loop, self.screencast.as_ref());
             _ = self.windows.insert(window_id,per_window)
         }
 
@@ -517,7 +694,9 @@ impl ApplicationHandler for App {
                     "Closing Window with {}",
                     format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple());
 
-                let PerWindow {surface,layout,pipeline,render_pass,swapchain,vertex_buffer,vertex_buffer_mem, .. } = self.windows.remove(&window_id).unwrap();
+                let PerWindow {surface,layout,pipeline,render_pass,swapchain,vertex_buffer,vertex_buffer_mem,
+                    ubufs,ubufs_mem,descriptor_set_layout,descriptor_pool, .. }
+                    = self.windows.remove(&window_id).unwrap();
                 unsafe {
                     //VERY IMPORTANT! otherwise, we'd try cleaning up semaphores n stuff while they're still in use
                     self.device.device_wait_idle().unwrap();
@@ -526,6 +705,16 @@ impl ApplicationHandler for App {
                     self.device.destroy_pipeline_layout(layout,None);
 
                     swapchain.cleanup(&self.device, &self.ext.swapchain);
+
+                    ubufs_mem.iter().for_each(|mem|{
+                        self.device.unmap_memory(*mem);
+                    });
+                    ubufs.iter().for_each(|buf|{
+                        self.device.destroy_buffer(*buf, None);
+                    });
+
+                    self.device.destroy_descriptor_pool(descriptor_pool, None);
+                    self.device.destroy_descriptor_set_layout(descriptor_set_layout,None);
 
                     self.device.destroy_buffer(vertex_buffer, None);
                     self.device.free_memory(vertex_buffer_mem, None);
@@ -580,15 +769,34 @@ impl ApplicationHandler for App {
                     command_buffers,
                     vertex_buffer,
                     push_constant_range,
+                    ubufs_map,
+                    descriptor_sets,
                     ..
                 } = per_window;
 
                 unsafe { device.reset_fences(&[swapchain.sync[self.current_frame].in_flight]).unwrap() };
 
-
+                let map = unsafe { ubufs_map[self.current_frame].cast::<UniformBufferObject>().as_mut().unwrap() };
+                map.model = [
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0]];
+                map.view = [
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0]];
+                map.proj = [
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0],
+                    [0.0,  0.0,  0.0,  0.0]];
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };
-                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],swapchain.extent,command_buffers[self.current_frame],next,*vertex_buffer,*layout,*push_constant_range) };
+                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],
+                                            swapchain.extent,command_buffers[self.current_frame],next,*vertex_buffer,*layout,*push_constant_range,
+                                            self.screencast.as_ref().unwrap().img, descriptor_sets.clone()) };
 
                 window.pre_present_notify();
 
@@ -652,6 +860,12 @@ impl ApplicationHandler for App {
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device.destroy_command_pool(self.command_pool,None);
+            if let Some(holder) = self.screencast.as_mut() {
+                self.device.destroy_sampler(holder.sampler, None);
+                self.device.destroy_image_view(holder.view, None);
+                self.device.destroy_image(holder.img, None);
+                self.device.free_memory(holder.mem, None);
+            }
             cleanup(&self.ext,self.debug_messenger,self.debug_reporter,&self.device);
         }
 
