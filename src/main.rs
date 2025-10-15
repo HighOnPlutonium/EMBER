@@ -17,8 +17,10 @@ use ash::Instance;
 use ash::{ext, vk};
 use ash::{khr, Device, Entry};
 use colored::Colorize;
+use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 use log::{debug, error, info, trace, warn, LevelFilter};
 use once_cell::unsync::Lazy;
+use pipewire::properties::properties;
 use std::borrow::Cow;
 use std::cell::{LazyCell, OnceCell, UnsafeCell};
 use std::error::Error;
@@ -33,10 +35,6 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fmt, fs, mem, ptr, slice, thread};
-use drm::ffi::xf86drm::drmMap;
-use pipewire::properties::properties;
-use pipewire::spa::pod::FixedSizedPod;
-use portal_screencast_waycap::ScreenCastStream;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
@@ -60,7 +58,7 @@ const VALIDATION_LAYERS: [&CStr;1] = [
 ];
 const REQUIRED_EXTENSIONS: [&CStr; 1] = [
     khr::surface::NAME,];
-const OPTIONAL_EXTENSIONS: [&CStr; 5] = [
+const OPTIONAL_EXTENSIONS: [&CStr; 6] = [
     ext::debug_utils::NAME,
     ext::debug_report::NAME,
 
@@ -68,15 +66,22 @@ const OPTIONAL_EXTENSIONS: [&CStr; 5] = [
     ext::acquire_drm_display::NAME,
 
     khr::external_memory_capabilities::NAME,
+    khr::get_physical_device_properties2::NAME,
+
 ];
 const REQUIRED_DEVICE_EXTENSIONS: [&CStr; 1] = [
     khr::swapchain::NAME,];
-const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 4] = [
+const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 8] = [
     ext::device_address_binding_report::NAME,
     khr::external_memory_fd::NAME,
     khr::external_memory::NAME,
     ext::external_memory_dma_buf::NAME,
 
+    ext::image_drm_format_modifier::NAME,
+
+    khr::bind_memory2::NAME,
+    khr::sampler_ycbcr_conversion::NAME,
+    khr::image_format_list::NAME,
 ];
 
 static OPT_EXT_LOCK: Mutex<Vec<&CStr>> = Mutex::new(vec![]);
@@ -174,7 +179,7 @@ fn main() -> Result<(),Box<dyn Error>>
         };
         let app_info = vk::ApplicationInfo {
             p_application_name: APPLICATION_TITLE.as_ptr().cast(),
-            api_version: vk::make_api_version(0,1,0,0),
+            api_version: vk::make_api_version(0,1,4,0),
             ..Default::default()};
         let create_info = vk::InstanceCreateInfo {
             p_next: ptr::from_ref(&debug_utils_create_info).cast(),
@@ -299,6 +304,15 @@ fn main() -> Result<(),Box<dyn Error>>
                 khr::external_memory_fd::Device::new(&INSTANCE,&device)),
             extmem_caps: (!opt_ext_lock.contains(&khr::external_memory_capabilities::NAME)).then(||
                 khr::external_memory_capabilities::Instance::new(&ENTRY,&INSTANCE)),
+            image_drm_format_modifier: (!opt_ext_lock.contains(&ext::image_drm_format_modifier::NAME)).then(||
+                ext::image_drm_format_modifier::Device::new(&INSTANCE,&device)),
+
+            bind_memory2: (!opt_ext_lock.contains(&khr::bind_memory2::NAME)).then(||
+                khr::bind_memory2::Device::new(&INSTANCE,&device)),
+            get_physical_device_properties2: (!opt_ext_lock.contains(&khr::get_physical_device_properties2::NAME)).then(||
+                khr::get_physical_device_properties2::Instance::new(&ENTRY, &INSTANCE)),
+            sampler_ycbcr_conversion: (!opt_ext_lock.contains(&khr::sampler_ycbcr_conversion::NAME)).then(||
+                khr::sampler_ycbcr_conversion::Device::new(&INSTANCE,&device)),
         }};
 
     let command_pool_info = vk::CommandPoolCreateInfo {
@@ -328,120 +342,177 @@ fn main() -> Result<(),Box<dyn Error>>
 
     let mut holder = SCHolder::default();
 
-    if let (Some(direct_mode),Some(linux_drm),Some(extmem_fd))
-        = (extension_holder.direct_mode.as_ref(),extension_holder.linux_drm.as_ref(),extension_holder.extmem_fd.as_ref())
-    { unsafe {
-        use portal_screencast_waycap::*;
-        use pipewire as pw;
+    unsafe {
+        let mut fd = Arc::new(OnceLock::<i32>::new());
+        let mut fd_clone = fd.clone();
 
-        let mut screen_cast = ScreenCast::new()?;
-        let screen_cast = screen_cast.start(None)?;
+        let fn_pw = || {
+                use pipewire;
+                use portal_screencast_waycap;
+                use pipewire::spa;
 
-        let fd = screen_cast.pipewire_fd();
-        let streams: Vec<&ScreenCastStream> = screen_cast.streams().collect();
-        dbg!(&fd);
-        dbg!(&streams);
-        let tmp_stream = streams[0];
+                let (pw_sender, pw_recv) = pipewire::channel::channel::<()>();
 
-        let pw_loop = pw::main_loop::MainLoopBox::new(None).unwrap();
-        let context = pw::context::ContextBox::new(&pw_loop.loop_(), None).unwrap();
-        let core = context.connect_fd(OwnedFd::from_raw_fd(fd), None).unwrap();
-        let props =  pw::properties::PropertiesBox::default();
-        let stream = pw::stream::StreamBox::new(&core, "screen-capture", props).unwrap();
+                let screencast = portal_screencast_waycap::ScreenCast::new()?
+                    .start(None)?;
 
-        let streamflags = {
-            type Flags = pw::stream::StreamFlags;
-            Flags::INACTIVE };
+                let pipewire_fd = screencast.pipewire_fd() as i32;
+                let screencast_stream = screencast.streams().next().unwrap();
+                let stream_node = screencast_stream.pipewire_node();
 
-        let pod = { pw::spa::pod::object!(
-            pw::spa::utils::SpaTypes::ObjectParamFormat,
-            pw::spa::param::ParamType::EnumFormat,
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::MediaType,
-                Id,
-                pw::spa::param::format::MediaType::Video
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::MediaSubtype,
-                Id,
-                pw::spa::param::format::MediaSubtype::Raw
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::VideoModifier,
-                Long,
-                0
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::VideoFormat,
-                Choice,
-                Enum,
-                Id,
-                pw::spa::param::video::VideoFormat::NV12,
-                pw::spa::param::video::VideoFormat::I420,
-                pw::spa::param::video::VideoFormat::BGRA,
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::VideoSize,
-                Choice,
-                Range,
-                Rectangle,
-                pw::spa::utils::Rectangle {
-                    width: 2560,
-                    height: 1440
-                }, // Default
-                pw::spa::utils::Rectangle {
-                    width: 1,
-                    height: 1
-                }, // Min
-                pw::spa::utils::Rectangle {
-                    width: 4096,
-                    height: 4096
-                } // Max
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::VideoFramerate,
-                Choice,
-                Range,
-                Fraction,
-                pw::spa::utils::Fraction { num: 240, denom: 1 }, // Default
-                pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
-                pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
-            ),
-        )
+                let pw_loop = Arc::new(pipewire::main_loop::MainLoopBox::new(None)?);
+                let pw_loop_clone = pw_loop.clone();
+                let pw_context = pipewire::context::ContextBox::new(pw_loop.loop_(), None)?;
+                let pw_core = pw_context.connect_fd(OwnedFd::from_raw_fd(pipewire_fd), None)?;
+                let core_listener = pw_core
+                    .add_listener_local()
+                    .info(|i| log::debug!("VIDEO CORE:\n{i:#?}"))
+                    .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+                    .done(|d, _| log::debug!("DONE: {d}"))
+                    .register();
+                let mut stream = pipewire::stream::StreamBox::new(
+                    &*pw_core,
+                    "EMBER_CAPTURE",
+                    properties! {
+                    *pipewire::keys::MEDIA_TYPE => "Video",
+                    *pipewire::keys::MEDIA_CATEGORY => "Capture",
+                    *pipewire::keys::MEDIA_ROLE => "Screen",
+                })?;
+                let stream_listener = stream
+                    .add_local_listener::<()>()
+                    .state_changed(move |_, _, old, new| {
+                        info!("Video Stream State Changed: {old:?} -> {new:?}");
+                    })
+                    .param_changed(move |_, _, id, param| {
+                        let Some(param) = param else { return; };
+
+                        if id != spa::param::ParamType::Format.as_raw() { return; }
+
+                        let (media_type, media_subtype) =
+                            match spa::param::format_utils::parse_format(param) {
+                                Ok(v) => v,
+                                Err(_) => return,
+                            };
+
+                        if media_type != spa::param::format::MediaType::Video
+                            || media_subtype != spa::param::format::MediaSubtype::Raw
+                        { return; }
+                    })
+                    .process(move |stream, _| {
+                        match stream.dequeue_buffer() {
+                            None => debug!("out of buffers"),
+                            Some(mut buffer) => {
+                                let datas = buffer.datas_mut();
+                                if datas.is_empty() { return; }
+                                let data = &mut datas[0];
+                                let raw_data = data.as_raw();
+
+                                if data.type_() == spa::buffer::DataType::DmaBuf {
+                                    let _fd = raw_data.fd;
+                                    if _fd > 0 { fd_clone.set(_fd as i32).unwrap_or_default() }
+                                    //pw_sender.clone().send(()).unwrap();
+                                }
+                            }
+                        }
+                    })
+                    .register()?;
+
+
+                let pw_obj = spa::pod::object!(
+                spa::utils::SpaTypes::ObjectParamFormat,
+                spa::param::ParamType::EnumFormat,
+                spa::pod::property!(
+                    spa::param::format::FormatProperties::MediaType,
+                    Id,
+                    spa::param::format::MediaType::Video
+                ),
+                spa::pod::property!(
+                    spa::param::format::FormatProperties::MediaSubtype,
+                    Id,
+                    spa::param::format::MediaSubtype::Raw
+                ),
+                spa::pod::property!(
+                    spa::param::format::FormatProperties::VideoModifier,
+                    Long,
+                    0
+                ),
+                spa::pod::property!(
+                    spa::param::format::FormatProperties::VideoFormat,
+                    Choice,
+                    Enum,
+                    Id,
+                    spa::param::video::VideoFormat::NV12,
+                    spa::param::video::VideoFormat::I420,
+                    spa::param::video::VideoFormat::BGRA,
+                ),
+                spa::pod::property!(
+                    spa::param::format::FormatProperties::VideoSize,
+                    Choice,
+                    Range,
+                    Rectangle,
+                    spa::utils::Rectangle {
+                        width: 2560,
+                        height: 1440
+                    }, // Default
+                    spa::utils::Rectangle {
+                        width: 1,
+                        height: 1
+                    }, // Min
+                    spa::utils::Rectangle {
+                        width: 4096,
+                        height: 4096
+                    } // Max
+                ),
+                spa::pod::property!(
+                    spa::param::format::FormatProperties::VideoFramerate,
+                    Choice,
+                    Range,
+                    Fraction,
+                    spa::utils::Fraction { num: 240, denom: 1 }, // Default
+                    spa::utils::Fraction { num: 0, denom: 1 },   // Min
+                    spa::utils::Fraction { num: 244, denom: 1 }  // Max
+                ),
+            );
+
+                let video_spa_values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
+                    std::io::Cursor::new(Vec::new()),
+                    &spa::pod::Value::Object(pw_obj),
+                )?.0.into_inner();
+
+                let mut video_params = [spa::pod::Pod::from_bytes(&video_spa_values).unwrap()];
+                stream.connect(
+                    spa::utils::Direction::Input,
+                    Some(stream_node),
+                    pipewire::stream::StreamFlags::AUTOCONNECT
+                        | pipewire::stream::StreamFlags::RT_PROCESS,
+                    &mut video_params)?;
+
+                let _recv = pw_recv.attach(pw_loop.loop_(), move |_| {
+                    debug!("Terminating video capture loop");
+                    pw_loop_clone.quit();
+                });
+
+                pw_loop.run();
+            Ok(())
         };
 
-        let video_spa_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()),
-            &pw::spa::pod::Value::Object(pod),
-        ).unwrap().0.into_inner();
+        let handle: thread::JoinHandle<Result<(),Box<dyn Error + Send + Sync>>> = thread::Builder::new()
+            .name("pipewire".to_owned())
+            .spawn(fn_pw).unwrap();
 
-        let mut video_params = [pw::spa::pod::Pod::from_bytes(&video_spa_values).unwrap()];
-        let listener = stream.add_local_listener::<()>()
-            .drained(|_,_|{println!("drained")})
-            .add_buffer(|_,_,_|{
-                println!("add_buffer")
-            })
-            .process(|_,_|{println!("process")})
-            .param_changed(|stream, _, id, pod|{
-                println!("param_changed")
-            });
-        let listener = listener.register().unwrap();
-        stream.connect(pipewire::spa::utils::Direction::Input, Some(tmp_stream.pipewire_node()), streamflags, &mut video_params).unwrap();
+        //straight up doesn't work if you comply and change the second unwrap to ?
+        //handle.join().unwrap().unwrap();
 
-
-        while (stream.state() == pw::stream::StreamState::Connecting) {
-            println!("Connecting");
-            thread::sleep(Duration::from_millis(500));
+        while fd.get().is_none() {
+            thread::sleep(Duration::from_millis(100));
         }
 
 
 
-        let mut buf = stream.dequeue_buffer().unwrap();
-        let fd = buf.datas_mut()[0].fd();
 
         let mem_import_info = vk::ImportMemoryFdInfoKHR {
             handle_type: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
-            fd: fd as i32,
+            fd: *fd.get().unwrap(),
             ..Default::default()};
         let mem_alloc_info = vk::MemoryAllocateInfo {
             p_next: ptr::from_ref(&mem_import_info).cast(),
@@ -450,7 +521,13 @@ fn main() -> Result<(),Box<dyn Error>>
             ..Default::default()};
         let mem = device.allocate_memory(&mem_alloc_info, None)?;
 
+        let format_modifiers = vec![DrmFourcc::Abgr8888 as u64, DrmModifier::Linear.into()];
+        let drm_format_modifier_list = vk::ImageDrmFormatModifierListCreateInfoEXT {
+            drm_format_modifier_count: format_modifiers.len() as u32,
+            p_drm_format_modifiers: format_modifiers.as_ptr(),
+            ..Default::default() };
         let ext_img_info = vk::ExternalMemoryImageCreateInfo {
+            p_next: ptr::from_ref(&drm_format_modifier_list).cast(),
             handle_types: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
             ..Default::default()};
         let img_info = vk::ImageCreateInfo {
@@ -460,18 +537,18 @@ fn main() -> Result<(),Box<dyn Error>>
                 Flags::default()
             },
             image_type: vk::ImageType::TYPE_2D,
-            format: vk::Format::R8G8B8A8_SNORM,
+            format: vk::Format::B8G8R8A8_SRGB,
             extent: vk::Extent3D { width: 1920, height: 1200, depth: 1 },
-            mip_levels: 0,
-            array_layers: 0,
-            samples: vk::SampleCountFlags::default(),
+            mip_levels: 1,
+            array_layers: 1,
+            samples: vk::SampleCountFlags::TYPE_1,
             tiling: vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
             usage: {
                 type Flags = vk::ImageUsageFlags;
                 Flags::SAMPLED
             },
             sharing_mode: vk::SharingMode::EXCLUSIVE,
-            initial_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            initial_layout: vk::ImageLayout::UNDEFINED,
             ..Default::default()};
         let img = device.create_image(&img_info, None)?;
 
@@ -517,7 +594,7 @@ fn main() -> Result<(),Box<dyn Error>>
         holder.img = img;
         holder.view = view;
         holder.sampler = sampler;
-    }}
+    };
 
     info!("Using Device {}",format!("{:?}",phys_device_properties.device_name_as_c_str().unwrap()).bright_purple());
     match event_loop.run_app(&mut App {
@@ -586,6 +663,10 @@ struct ExtensionHolder {
 
     extmem_fd: Option<khr::external_memory_fd::Device>,
     extmem_caps: Option<khr::external_memory_capabilities::Instance>,
+    image_drm_format_modifier: Option<ext::image_drm_format_modifier::Device>,
+    bind_memory2: Option<khr::bind_memory2::Device>,
+    get_physical_device_properties2: Option<khr::get_physical_device_properties2::Instance>,
+    sampler_ycbcr_conversion: Option<khr::sampler_ycbcr_conversion::Device>,
 }
 
 enum OSSurface {
@@ -613,6 +694,7 @@ unsafe fn cleanup(
 }
 
 
+#[repr(C)]
 struct UniformBufferObject {
     model: [[f32;4];4],
     view: [[f32;4];4],
@@ -795,7 +877,7 @@ impl ApplicationHandler for App {
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };
                 unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],
-                                            swapchain.extent,command_buffers[self.current_frame],next,*vertex_buffer,*layout,*push_constant_range,
+                                            swapchain.extent,command_buffers[self.current_frame],self.current_frame,*vertex_buffer,*layout,*push_constant_range,
                                             self.screencast.as_ref().unwrap().img, descriptor_sets.clone()) };
 
                 window.pre_present_notify();

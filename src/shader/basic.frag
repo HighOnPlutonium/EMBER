@@ -6,13 +6,15 @@ layout(location = 0) out vec4 color;
 layout(location = 0) in vec3 outPosition;
 
 
-layout(binding = 1) uniform sampler2D tex;
 
 layout(push_constant) uniform pc {
     vec2 rand;
     float aspect;
     float t;
+    vec2 win_pos;
 };
+
+layout(binding = 1) uniform sampler2D tex;
 
 
 
@@ -59,21 +61,46 @@ float hashRandom( vec4  v ) { return floatConstruct(hash(floatBitsToUint(v))); }
 
 
 
+
+
+
 void main() {
+    float root_aspect = 1200.0/1920.0;
+    float scale = 1.0;
+
     vec2 pos = outPosition.xy * vec2(aspect,1);
     vec3 C = vec3(0);
     float A = 1;
 
 
-    color = texture(tex, outPosition);
 
-    float r1 = hashRandom(pos*t);
-    float r2 = hashRandom(pos*(floor(t*20)/20));
-    //float manhattan = abs(pos.x) + abs(pos.y);
-    float chebyshev = max(abs(pos.x),abs(pos.y));
-    C = vec3(r2);
-    if (chebyshev < 0.5) C = vec3(r1);
-    A = 1;
+    /*
+    const int SIZE = 5;
+    float MULT = 1.0/256.0;
+    float[SIZE][SIZE] kernel = {
+        {1, 4,  6,  4,  1},
+        {4, 16, 24, 16, 4},
+        {6, 24, 36, 24, 6},
+        {4, 16, 24, 16, 4},
+        {1, 4,  6,  4,  1}};
+    */
+
+    const int SIZE = 3;
+    float MULT = -1;
+    float[SIZE][SIZE] kernel = {
+        {  1,  1,  1 },
+        {  1, -9,  1},
+        {  1,  1,  1}};
+
+
+
+    vec2 tex_pos = (outPosition.xy + vec2(1))/2 * vec2(root_aspect*aspect,1) * scale;
+
+    for (int i = 0; i < SIZE; i++) {
+    for (int j = 0; j < SIZE; j++) {
+        C += MULT * kernel[i][j] * texelFetch(tex, ivec2(tex_pos*vec2(1920,1200)-roundEven(float(SIZE)/2.0))+ivec2(i,j), 0).xyz;
+    }}
 
     color = vec4(C*A,A);
+
 }

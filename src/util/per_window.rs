@@ -212,13 +212,18 @@ impl<'a> WindowBuilder<'a> {
             ubufs_map.push(map);
         });
 
+
+        let sets = vec![descriptor_set_layout,descriptor_set_layout];
+
         let descriptor_set_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
             descriptor_set_count: MAX_FRAMES_IN_FLIGHT,
-            p_set_layouts: &descriptor_set_layout,
+            p_set_layouts: sets.as_ptr(),
             ..Default::default()};
 
+
         let descriptor_sets = unsafe { self.device.allocate_descriptor_sets(&descriptor_set_info).unwrap() };
+        println!("desc set alloc done");
 
         (0..MAX_FRAMES_IN_FLIGHT).for_each(|idx|{
             let buf_info = vk::DescriptorBufferInfo {
@@ -255,6 +260,7 @@ impl<'a> WindowBuilder<'a> {
             let descriptor_writes: Vec<vk::WriteDescriptorSet> = vec![descriptor_write_ubo,descriptor_write_img];
             unsafe { self.device.update_descriptor_sets(descriptor_writes.as_slice(), &[]) };
         });
+
 
         let cmd_alloc_info = vk::CommandBufferAllocateInfo {
             command_pool: self.command_pool,

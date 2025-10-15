@@ -1,11 +1,13 @@
 use std::mem::offset_of;
-use std::{fs, ptr, slice};
+use std::{fs, mem, process, ptr, slice};
 use std::error::Error;
 use std::fs::DirEntry;
 use ash::{khr, vk, Device};
 use ash::vk::{DescriptorPool, DescriptorSetLayout, Pipeline, PipelineLayout, PushConstantRange};
 use log::{error, info};
 use shaderc::{CompilationArtifact, IncludeCallbackResult, IncludeType, ResolvedInclude};
+use winit::platform::wayland::WindowExtWayland;
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::Window;
 use crate::{UniformBufferObject, MAX_FRAMES_IN_FLIGHT, T_ZERO};
 use crate::util::per_window::PerWindow;
@@ -204,20 +206,21 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         ..Default::default()};
 
 
+    const UNIFORM_BUFFER_SIZE: u32 = 48;
     let pool_size_ubo = vk::DescriptorPoolSize {
         ty: vk::DescriptorType::UNIFORM_BUFFER,
-        descriptor_count: MAX_FRAMES_IN_FLIGHT,
+        descriptor_count: UNIFORM_BUFFER_SIZE*2, // todo!
     };
     let pool_size_img = vk::DescriptorPoolSize {
         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        descriptor_count: MAX_FRAMES_IN_FLIGHT,
+        descriptor_count: 1*2,
     };
     let pool_size: Vec<vk::DescriptorPoolSize> = vec![pool_size_ubo,pool_size_img];
     let pool_info = vk::DescriptorPoolCreateInfo {
         flags: vk::DescriptorPoolCreateFlags::default(),
         max_sets: MAX_FRAMES_IN_FLIGHT,
         pool_size_count: 2,
-        p_pool_sizes: ptr::from_ref(&pool_size).cast(),
+        p_pool_sizes: pool_size.as_ptr(),
         ..Default::default()};
     let descriptor_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
 
@@ -226,7 +229,14 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
             stage_flags: { type Flags = vk::ShaderStageFlags;
                 Flags::FRAGMENT },
             offset: 0,
-            size: 16 }; // todo!
+            size: 24 }; // todo!
+
+    let ubo_layout_binding = vk::DescriptorSetLayoutBinding {
+        binding: 0,
+        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+        descriptor_count: UNIFORM_BUFFER_SIZE, // todo!
+        stage_flags: vk::ShaderStageFlags::VERTEX,
+        ..Default::default()};
 
     let sampler_layout_binding = vk::DescriptorSetLayoutBinding {
         binding: 1,
@@ -236,24 +246,14 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         p_immutable_samplers: ptr::null(),
         ..Default::default()};
 
-    let ubo_layout_binding = vk::DescriptorSetLayoutBinding {
-        binding: 0,
-        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-        descriptor_count: 1,
-        stage_flags: vk::ShaderStageFlags::VERTEX,
-        ..Default::default()};
-
     let bindings: Vec<vk::DescriptorSetLayoutBinding> = vec![ubo_layout_binding, sampler_layout_binding];
 
     let descriptor_set_layout_info = vk::DescriptorSetLayoutCreateInfo {
-        //flags: vk::DescriptorSetLayoutCreateFlags::DESCRIPTOR_BUFFER_EXT,
         binding_count: bindings.len() as u32,
         p_bindings: bindings.as_ptr(),
         ..Default::default()};
 
     let descriptor_set_layout = device.create_descriptor_set_layout(&descriptor_set_layout_info, None).unwrap();
-
-
 
 
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo {
@@ -363,7 +363,7 @@ pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views
 
 pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline,
                                         render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D,
-                                        command_buffer: vk::CommandBuffer, image_index: u32, vertex_buffer: vk::Buffer, pipeline_layout: vk::PipelineLayout,
+                                        command_buffer: vk::CommandBuffer, image_index: usize, vertex_buffer: vk::Buffer, pipeline_layout: vk::PipelineLayout,
                                         push_constant_range: vk::PushConstantRange, screen_cast: vk::Image, descriptor_sets: Vec<vk::DescriptorSet>) {
     let begin_info = vk::CommandBufferBeginInfo {
         //flags: vk::CommandBufferUsageFlags,
@@ -398,15 +398,19 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     let scissor = vk::Rect2D::from(extent);
     device.cmd_set_scissor(command_buffer,0,&[scissor]);
 
-
-    device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, &[descriptor_sets[image_index as usize]], &[]);
-
+    device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, &[descriptor_sets[image_index]], &[]);
 
 
-    let mut data: (f32,f32,f32,f32) = (0.0,0.0,(window.inner_size().width as f32)/(window.inner_size().height as f32),0.0);
+
+    let pos = (0,0);
+
+    let mut data: (f32,f32,f32,f32,f32,f32) = (
+        0.0, 0.0,
+        (window.inner_size().width as f32)/(window.inner_size().height as f32),
+        0.0,
+        pos.0 as f32, pos.1 as f32);
     [data.0,data.1].fill_with(rand::random);
     data.3 = T_ZERO.elapsed().as_secs_f32();
-    if (data.3%3.0<1.0) { data.3 = data.3.floor() };
 
     // todo!
     device.cmd_push_constants(command_buffer, pipeline_layout,
