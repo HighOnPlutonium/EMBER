@@ -229,7 +229,7 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
             stage_flags: { type Flags = vk::ShaderStageFlags;
                 Flags::FRAGMENT },
             offset: 0,
-            size: 24 }; // todo!
+            size: 20 }; // todo!
 
     let ubo_layout_binding = vk::DescriptorSetLayoutBinding {
         binding: 0,
@@ -364,7 +364,7 @@ pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views
 pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeline: vk::Pipeline,
                                         render_pass: vk::RenderPass, framebuffer: vk::Framebuffer, extent: vk::Extent2D,
                                         command_buffer: vk::CommandBuffer, image_index: usize, vertex_buffer: vk::Buffer, pipeline_layout: vk::PipelineLayout,
-                                        push_constant_range: vk::PushConstantRange, screen_cast: vk::Image, descriptor_sets: Vec<vk::DescriptorSet>) {
+                                        push_constant_range: vk::PushConstantRange, screen_cast: vk::Image, descriptor_sets: Vec<vk::DescriptorSet>, id: i32) {
     let begin_info = vk::CommandBufferBeginInfo {
         //flags: vk::CommandBufferUsageFlags,
         p_inheritance_info: ptr::null(),
@@ -402,13 +402,12 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
 
 
 
-    let pos = (0,0);
 
-    let mut data: (f32,f32,f32,f32,f32,f32) = (
+    let mut data: (f32,f32,f32,f32,i32) = (
         0.0, 0.0,
         (window.inner_size().width as f32)/(window.inner_size().height as f32),
         0.0,
-        pos.0 as f32, pos.1 as f32);
+        id);
     [data.0,data.1].fill_with(rand::random);
     data.3 = T_ZERO.elapsed().as_secs_f32();
 

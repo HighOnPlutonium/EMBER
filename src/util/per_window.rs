@@ -33,6 +33,8 @@ pub struct PerWindow {
     pub ubufs_map: Vec<*mut ffi::c_void>,
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
+
+    pub id: i32,
 }
 
 
@@ -285,6 +287,7 @@ impl<'a> WindowBuilder<'a> {
             ubufs_map,
             descriptor_pool,
             descriptor_sets,
+            id: 0,
         })
     }
 }

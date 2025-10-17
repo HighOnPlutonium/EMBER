@@ -46,7 +46,7 @@ use winit::window::{WindowId, WindowLevel};
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
-const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+const MAX_FRAMES_IN_FLIGHT: u32 = 1;
 
 const VALIDATION_LAYERS: [&CStr;1] = [
     //c"VK_LAYER_LUNARG_api_dump",
@@ -714,7 +714,8 @@ impl ApplicationHandler for App {
             .with_title(APPLICATION_TITLE)
             .with_active(true)
             .with_transparent(true)
-            .with_inner_size(Size::Logical(LogicalSize::new(400f64,400f64)));
+            .with_inner_size(Size::Logical(LogicalSize::new(400f64,400f64)))
+            .with_decorations(true);
 
         let mut window_count = WINDOW_COUNT;
         if WINDOW_COUNT > 5 {
@@ -723,7 +724,8 @@ impl ApplicationHandler for App {
 
         (0..window_count).for_each(|idx| {
             builder.attributes.title = format!("{}  #{}",APPLICATION_TITLE,idx+1);
-            let (window_id,per_window) = builder.build(event_loop, self.screencast.as_ref());
+            let (window_id, mut per_window) = builder.build(event_loop, self.screencast.as_ref());
+            per_window.id = idx as i32;
             /*
             let fp = unsafe { WindowsFFI::load_function_pointers() };
             per_window.toggle_blur(&fp);
@@ -736,7 +738,8 @@ impl ApplicationHandler for App {
             debug!("THE LARGE AMOUNT OF WINDOWS IS INTENTIONAL.");
             info!("by the way, that above was on \"{}\" due to the color being highly visible, not because of it being debugging-related.","DEBUG".bright_cyan());
             builder.attributes.title = "yes, this is intentional".to_owned();
-            let (window_id,per_window) = builder.build(event_loop, self.screencast.as_ref());
+            let (window_id, mut per_window) = builder.build(event_loop, self.screencast.as_ref());
+            per_window.id = window_count as i32;
             _ = self.windows.insert(window_id,per_window)
         }
 
@@ -764,6 +767,9 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(keycode) = event.physical_key {
                     match keycode {
                         KeyCode::Escape => { self.window_event(event_loop, window_id, WindowEvent::CloseRequested) }
+                        KeyCode::Enter => {
+                            if (!event.state.is_pressed() || event.repeat) { return; }
+                            window.set_decorations(!window.is_decorated()) }
                         _ => {}
                     }
             }
@@ -806,7 +812,7 @@ impl ApplicationHandler for App {
                 }
                 if self.windows.len() == 0 { event_loop.exit() };
             }
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(size) => {
                 //should probably do some of the swapchain recreation here
                 //although that's left for a later date: todo!
                 self.resized = true;
@@ -853,6 +859,7 @@ impl ApplicationHandler for App {
                     push_constant_range,
                     ubufs_map,
                     descriptor_sets,
+                    id,
                     ..
                 } = per_window;
 
@@ -875,10 +882,11 @@ impl ApplicationHandler for App {
                     [0.0,  0.0,  0.0,  0.0],
                     [0.0,  0.0,  0.0,  0.0]];
 
+
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };
-                unsafe { record_into_buffer(device,window,*pipeline,*render_pass,swapchain.framebuffers[next as usize],
-                                            swapchain.extent,command_buffers[self.current_frame],self.current_frame,*vertex_buffer,*layout,*push_constant_range,
-                                            self.screencast.as_ref().unwrap().img, descriptor_sets.clone()) };
+                unsafe { record_into_buffer(device, window, *pipeline, *render_pass, swapchain.framebuffers[next as usize],
+                                            swapchain.extent, command_buffers[self.current_frame], self.current_frame, *vertex_buffer, *layout, *push_constant_range,
+                                            self.screencast.as_ref().unwrap().img, descriptor_sets.clone(), *id) };
 
                 window.pre_present_notify();
 
