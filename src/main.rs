@@ -17,10 +17,8 @@ use ash::Instance;
 use ash::{ext, vk};
 use ash::{khr, Device, Entry};
 use colored::Colorize;
-use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 use log::{debug, error, info, trace, warn, LevelFilter};
 use once_cell::unsync::Lazy;
-use pipewire::properties::properties;
 use std::borrow::Cow;
 use std::cell::{LazyCell, OnceCell, UnsafeCell};
 use std::error::Error;
@@ -29,7 +27,6 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{ControlFlow, Deref};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
@@ -43,6 +40,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{WindowId, WindowLevel};
+
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
+use pipewire::properties::properties;
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
@@ -102,7 +103,6 @@ static       INSTANCE: Antistatic<Instance>         = Antistatic::new();
 static LOGGER: ConsoleLogger = ConsoleLogger;
 fn main() -> Result<(),Box<dyn Error>>
 {
-
     #[cfg(windows)]
     ansi_term::enable_ansi_support().unwrap();
     unsafe { env::set_var("COLORTERM","truecolor"); }
