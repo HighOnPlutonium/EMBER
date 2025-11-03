@@ -112,11 +112,7 @@ fn main() -> Result<(),Box<dyn Error>>
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(event_loop::ControlFlow::Poll);
-
-
     DISPLAY_HANDLE.set(event_loop.display_handle()?.as_raw());
-
-
 
     let debug_utils_create_info = vk::DebugUtilsMessengerCreateInfoEXT {
         message_severity: {
@@ -130,7 +126,6 @@ fn main() -> Result<(),Box<dyn Error>>
         pfn_user_callback: Some(util::logging::debug_callback),
         p_user_data: ptr::null_mut(),
         ..Default::default()};
-
     let debug_reporter_create_info = vk::DebugReportCallbackCreateInfoEXT {
         flags: {
             type Flags = vk::DebugReportFlagsEXT;
@@ -193,7 +188,6 @@ fn main() -> Result<(),Box<dyn Error>>
         unsafe { ENTRY.create_instance(&create_info, None)? }
     };
     INSTANCE.set(instance);
-
 
     let mut opt_device_ext_lock: Vec<&CStr> = Vec::with_capacity(0);
     // todo!    MAKE THIS SECTION LESS FUCKING UGLY
@@ -322,15 +316,13 @@ fn main() -> Result<(),Box<dyn Error>>
         ..Default::default()};
     let command_pool = unsafe { device.create_command_pool(&command_pool_info,None).unwrap() };
 
-    //in case we either don't want a debug messenger or the related extension isn't available.
-    //otherwise we put the messenger this Option<> here
+
     let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
     if let Some(debug_utils) = extension_holder.debug_utils.as_ref() {
         debug_messenger = match unsafe { debug_utils.create_debug_utils_messenger(&debug_utils_create_info, None) } {
             Ok(debug_messenger) => Some(debug_messenger),
             Err(e) => { error!("Debug Messenger creation failed: {:?}; Execution will continue without it.",e); None }
         }}
-
     let mut debug_reporter: Option<vk::DebugReportCallbackEXT> = None;
     if let Some(debug_report) = extension_holder.debug_report.as_ref() {
         debug_reporter = match unsafe { debug_report.create_debug_report_callback(&debug_reporter_create_info, None) } {
@@ -341,11 +333,9 @@ fn main() -> Result<(),Box<dyn Error>>
 
 
     let mut holder = SCHolder::default();
-
     unsafe {
         let mut fd = Arc::new(OnceLock::<i32>::new());
         let mut fd_clone = fd.clone();
-
         let fn_pw = || {
                 use pipewire;
                 use portal_screencast_waycap;
@@ -495,20 +485,12 @@ fn main() -> Result<(),Box<dyn Error>>
                 pw_loop.run();
             Ok(())
         };
-
         let handle: thread::JoinHandle<Result<(),Box<dyn Error + Send + Sync>>> = thread::Builder::new()
             .name("pipewire".to_owned())
             .spawn(fn_pw).unwrap();
-
-        //straight up doesn't work if you comply and change the second unwrap to ?
-        //handle.join().unwrap().unwrap();
-
         while fd.get().is_none() {
             thread::sleep(Duration::from_millis(100));
         }
-
-
-
 
         let mem_import_info = vk::ImportMemoryFdInfoKHR {
             handle_type: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
@@ -516,7 +498,7 @@ fn main() -> Result<(),Box<dyn Error>>
             ..Default::default()};
         let mem_alloc_info = vk::MemoryAllocateInfo {
             p_next: ptr::from_ref(&mem_import_info).cast(),
-            allocation_size: 1920*1200*4,
+            allocation_size: 1920*1200*4,   // todo! hardcoded shit
             memory_type_index: 0,
             ..Default::default()};
         let mem = device.allocate_memory(&mem_alloc_info, None)?;
@@ -615,6 +597,8 @@ fn main() -> Result<(),Box<dyn Error>>
         current_frame: 0,
 
         screencast: Some(holder),
+        ctrl_vals: [[0.0,0.0,2.0],[0.0,0.0,0.0,],[0.0,0.0,0.0],[0.0,0.0,0.0]],
+        mode: 0,
     })
     {
         Ok(_) => Ok(()),
@@ -648,6 +632,8 @@ pub(crate) struct App {
     current_frame: usize,
 
     screencast: Option<SCHolder>,
+    ctrl_vals: [[f32;3];4],
+    mode: usize,
 }
 
 struct ExtensionHolder {
@@ -693,12 +679,15 @@ unsafe fn cleanup(
     INSTANCE.destroy_instance(None);
 }
 
+const FOV: f32 = 75.0;
+const NEAR: f32 = 0.01;
+const FAR: f32 = 20.0;
 
 #[repr(C)]
 struct UniformBufferObject {
-    model: [[f32;4];4],
-    view: [[f32;4];4],
-    proj: [[f32;4];4],
+    model: glm::Mat4,
+    view: glm::Mat4,
+    proj: glm::Mat4,
 }
 
 
@@ -770,9 +759,52 @@ impl ApplicationHandler for App {
                         KeyCode::Enter => {
                             if (!event.state.is_pressed() || event.repeat) { return; }
                             window.set_decorations(!window.is_decorated()) }
+
+
+                        KeyCode::AltLeft => {
+                            if !event.state.is_pressed() { return; }
+                            self.mode = (self.mode + 1) % 4;
+                            debug!("mode: {}",self.mode);
+                        }
+                        KeyCode::ArrowLeft => {
+                            if !event.state.is_pressed() { return; }
+                            let [x,y,z] = self.ctrl_vals[self.mode];
+                            self.ctrl_vals[self.mode] = [x-0.1,y,z];
+                            debug!("{} -> {:?}",self.mode,self.ctrl_vals[self.mode]);
+                        }
+                        KeyCode::ArrowRight => {
+                            if !event.state.is_pressed() { return; }
+                            let [x,y,z] = self.ctrl_vals[self.mode];
+                            self.ctrl_vals[self.mode] = [x+0.1,y,z];
+                            debug!("{} -> {:?}",self.mode,self.ctrl_vals[self.mode]);
+                        }
+                        KeyCode::ArrowUp => {
+                            if !event.state.is_pressed() { return; }
+                            let [x,y,z] = self.ctrl_vals[self.mode];
+                            self.ctrl_vals[self.mode] = [x,y-0.1,z];
+                            debug!("{} -> {:?}",self.mode,self.ctrl_vals[self.mode]);
+                        }
+                        KeyCode::ArrowDown => {
+                            if !event.state.is_pressed() { return; }
+                            let [x,y,z] = self.ctrl_vals[self.mode];
+                            self.ctrl_vals[self.mode] = [x,y+0.1,z];
+                            debug!("{} -> {:?}",self.mode,self.ctrl_vals[self.mode]);
+                        }
+                        KeyCode::Space => {
+                            if !event.state.is_pressed() { return; }
+                            let [x,y,z] = self.ctrl_vals[self.mode];
+                            self.ctrl_vals[self.mode] = [x,y,z-0.1];
+                            debug!("{} -> {:?}",self.mode,self.ctrl_vals[self.mode]);
+                        }
+                        KeyCode::ShiftLeft => {
+                            if !event.state.is_pressed() { return; }
+                            let [x,y,z] = self.ctrl_vals[self.mode];
+                            self.ctrl_vals[self.mode] = [x,y,z+0.1];
+                            debug!("{} -> {:?}",self.mode,self.ctrl_vals[self.mode]);
+                        }
                         _ => {}
-                    }
-            }
+                    }}
+
             WindowEvent::CloseRequested => {
                 //fetching the number inside WindowId structs using unsafe code. Why? makes the console output look better.
                 //this should also cause UB if you use any system with 32bit window handles/IDs.
@@ -857,6 +889,7 @@ impl ApplicationHandler for App {
                     command_buffers,
                     vertex_buffer,
                     push_constant_range,
+                    ubufs,
                     ubufs_map,
                     descriptor_sets,
                     id,
@@ -866,21 +899,34 @@ impl ApplicationHandler for App {
                 unsafe { device.reset_fences(&[swapchain.sync[self.current_frame].in_flight]).unwrap() };
 
                 let map = unsafe { ubufs_map[self.current_frame].cast::<UniformBufferObject>().as_mut().unwrap() };
-                map.model = [
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0]];
-                map.view = [
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0]];
-                map.proj = [
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0],
-                    [0.0,  0.0,  0.0,  0.0]];
+
+
+                let [[cx,cy,cz],[cu,cv,cw],[ox,oy,oz],[ou,ov,ow]] = self.ctrl_vals;
+                let aspect = (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
+
+                map.model = glm::mat4(
+                    1.0,    0.0,    0.0,    0.0,
+                    0.0,    1.0,    0.0,    0.0,
+                    0.0,    0.0,    1.0,    0.0,
+                    ox,    oy,    oz,    1.0);
+
+                map.model = glm::ext::rotate(&map.model, ou, glm::vec3(1.0,0.0,0.0));
+                map.model = glm::ext::rotate(&map.model, ov, glm::vec3(0.0,1.0,0.0));
+                map.model = glm::ext::rotate(&map.model, ow, glm::vec3(0.0,0.0,1.0));
+
+
+                map.view = glm::mat4(
+                    1.0,    0.0,    0.0,    0.0,
+                    0.0,    1.0,    0.0,    0.0,
+                    0.0,    0.0,    1.0,    0.0,
+                    -cx,    -cy,    -cz,    1.0);
+
+                map.view = glm::ext::rotate(&map.view, cu, glm::vec3(1.0,0.0,0.0));
+                map.view = glm::ext::rotate(&map.view, cv, glm::vec3(0.0,1.0,0.0));
+                map.view = glm::ext::rotate(&map.view, cw, glm::vec3(0.0,0.0,1.0));
+
+
+                map.proj = glm::ext::perspective(FOV.to_radians(), aspect, NEAR, FAR);
 
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };

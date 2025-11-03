@@ -6,6 +6,8 @@
 
 layout(location = 0) out vec4 color;
 layout(location = 0) in vec3 outPosition;
+layout(location = 2) in vec2 outTexCoords;
+layout(location = 3) flat in vec2 instance;
 
 
 
@@ -215,45 +217,12 @@ void main() {
         {1,-8,1},
         {1,1,1}};
 
-    float[11][11] tmp1 = {
-        {},
-        {},
-        {},
-        {},
-        {},
-        {},
-        {},
-        {},
-        {},
-        {},
-        {}};
 
-    float[11][11] tmp2 = {
-        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-        {-1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-        {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
-        {-3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3},
-        {-5,-8,-5,-3,-1, 0, 1, 3, 5, 8, 5},
-        {-8,-5,-3,-2,-1, 0, 1, 2, 3, 5, 8},
-        {-5,-8,-5,-3,-1, 0, 1, 3, 5, 8, 5},
-        {-3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3},
-        {-2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
-        {-1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
-        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    //vec3 g1 = convolve3(ridge, tex, tex_pos);
+    //C = vec3(g1);
 
-
-
-
-
-    float Gx = convolve(sobel1, tex, tex_pos);
-    float Gy = convolve(sobel2, tex, tex_pos);
-    vec3  H  = hueShift(vec3(1,0,0),atan(Gy,Gx)*2 + PI);
-
-    float temp1 = convolve(tmp1, tex, tex_pos);
-    float temp2 = convolve(tmp2, tex, tex_pos);
-    float delta = sqrt(pow(temp1,2.0)+pow(temp2,2.0));
-    C = vec3(delta);
-
+    //C = vec3(texture(tex, outTexCoords));
+    C = vec3(hashRandom(instance+t));
     color = vec4(C*A,A);
 
 }

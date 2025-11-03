@@ -55,16 +55,16 @@ fn load_shaders(source: &str, kind: shaderc::ShaderKind) -> shaderc::Result<Comp
 #[derive(Copy, Clone)]
 pub struct Vertex {
     pos: [f32;3],
+    tex: [f32;2],
 }
 
+
 pub const VERTICES: [Vertex;4] = [
-    Vertex { pos: [ 1.0,  1.0, 0.0] },
-    Vertex { pos: [ 1.0, -1.0, 0.0] },
-    Vertex { pos: [-1.0,  1.0, 0.0] },
-    Vertex { pos: [-1.0, -1.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0, 0.0], tex: [1.0, 1.0] },
+    Vertex { pos: [ 1.0, -1.0, 0.0], tex: [1.0, 0.0] },
+    Vertex { pos: [-1.0,  1.0, 0.0], tex: [0.0, 1.0] },
+    Vertex { pos: [-1.0, -1.0, 0.0], tex: [0.0, 0.0] },
 ];
-
-
 
 
 
@@ -129,6 +129,11 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
             binding: 0,
             format: vk::Format::R32G32B32_SFLOAT,
             offset: offset_of!(Vertex, pos) as u32 },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: offset_of!(Vertex, tex) as u32 },
     ];
 
     let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
@@ -189,13 +194,13 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
     let blending_attachment_info = vk::PipelineColorBlendAttachmentState {
         color_write_mask: vk::ColorComponentFlags::RGBA,
         blend_enable: vk::FALSE,
-/*
+
         src_color_blend_factor: vk::BlendFactor::ONE,
         dst_color_blend_factor: vk::BlendFactor::ONE,
         color_blend_op: vk::BlendOp::ADD,
         src_alpha_blend_factor: vk::BlendFactor::ONE,
         dst_alpha_blend_factor: vk::BlendFactor::ONE,
-        alpha_blend_op: vk::BlendOp::MAX,*/
+        alpha_blend_op: vk::BlendOp::MAX,
         ..Default::default()};
     let blending_info = vk::PipelineColorBlendStateCreateInfo {
         //there's a funny bitflag for custom blending as specified in a fragment shader. not yet implemented in my code.
@@ -213,7 +218,7 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
     };
     let pool_size_img = vk::DescriptorPoolSize {
         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        descriptor_count: 1*2,
+        descriptor_count: 2,
     };
     let pool_size: Vec<vk::DescriptorPoolSize> = vec![pool_size_ubo,pool_size_img];
     let pool_info = vk::DescriptorPoolCreateInfo {
@@ -347,7 +352,6 @@ pub(crate) unsafe fn create_framebuffers(device: &Device, window: &Window, views
     let mut returnee: Vec<vk::Framebuffer> = Vec::with_capacity(views.len());
     for view in views {
         let framebuffer_info = vk::FramebufferCreateInfo {
-            //flags: vk::FramebufferCreateFlags::IMAGELESS    commented out because this might end up useful to me some day
             render_pass,
             attachment_count: 1,
             p_attachments: ptr::from_ref(&view),
@@ -418,7 +422,7 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
                               slice::from_raw_parts(ptr::from_ref(&data) as *const _, size_of_val(&data)));
 
 
-    device.cmd_draw(command_buffer,VERTICES.len() as u32,1,0,0);
+    device.cmd_draw(command_buffer,VERTICES.len() as u32,1024,0,0);
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();

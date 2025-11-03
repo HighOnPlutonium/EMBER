@@ -8,7 +8,7 @@ use log::{debug, error};
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{ExtensionHolder, OSSurface, SCHolder, UniformBufferObject, INSTANCE, MAX_FRAMES_IN_FLIGHT};
+use crate::{ExtensionHolder, OSSurface, SCHolder, UniformBufferObject, FAR, FOV, INSTANCE, MAX_FRAMES_IN_FLIGHT, NEAR};
 use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_views, Vertex, VERTICES};
 use crate::util::logging::Logged;
 use crate::util::swapchain::PerSwapchain;
