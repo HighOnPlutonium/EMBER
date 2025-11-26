@@ -1,5 +1,6 @@
 use core::ffi;
 use std::error::Error;
+use std::ffi::c_void;
 use std::ptr;
 use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 use ash::{vk, Device};
@@ -8,7 +9,7 @@ use log::{debug, error};
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{ExtensionHolder, OSSurface, SCHolder, UniformBufferObject, FAR, FOV, INSTANCE, MAX_FRAMES_IN_FLIGHT, NEAR};
+use crate::{ExtensionHolder, MVBufferObject, OSSurface, SCHolder, UniformBufferObject, FAR, FOV, INSTANCE, MAX_FRAMES_IN_FLIGHT, NEAR};
 use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_views, Vertex, VERTICES};
 use crate::util::logging::Logged;
 use crate::util::swapchain::PerSwapchain;
@@ -30,7 +31,10 @@ pub struct PerWindow {
     pub descriptor_set_layout: vk::DescriptorSetLayout,
     pub ubufs: Vec<vk::Buffer>,
     pub ubufs_mem: Vec<vk::DeviceMemory>,
-    pub ubufs_map: Vec<*mut ffi::c_void>,
+    pub ubufs_map: Vec<*mut c_void>,
+    pub mv_ubufs: Vec<vk::Buffer>,
+    pub mv_ubufs_mem: Vec<vk::DeviceMemory>,
+    pub mv_ubufs_map: Vec<*mut c_void>,
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
 
@@ -192,6 +196,10 @@ impl<'a> WindowBuilder<'a> {
         let mut ubufs_mem: Vec<vk::DeviceMemory> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
         let mut ubufs_map: Vec<*mut ffi::c_void> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
 
+        let mut mv_ubufs: Vec<vk::Buffer> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+        let mut mv_ubufs_mem: Vec<vk::DeviceMemory> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+        let mut mv_ubufs_map: Vec<*mut ffi::c_void> = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+
 
         let buf_info = vk::BufferCreateInfo {
             flags: vk::BufferCreateFlags::default(),
@@ -204,14 +212,36 @@ impl<'a> WindowBuilder<'a> {
             memory_type_index: 0, // todo! actually check memtype
             ..Default::default()};
 
+        let mv_buf_info = vk::BufferCreateInfo {
+            flags: vk::BufferCreateFlags::default(),
+            size: size_of::<MVBufferObject>() as u64,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()};
+        let mv_buf_mem_info = vk::MemoryAllocateInfo {
+            allocation_size: mv_buf_info.size,
+            memory_type_index: 0, // todo! actually check memtype
+            ..Default::default()};
+
+        let mut buf: vk::Buffer = vk::Buffer::null();
+        let mut mem: vk::DeviceMemory = vk::DeviceMemory::null();
+        let mut map: *mut c_void = ptr::null_mut();
         (0..MAX_FRAMES_IN_FLIGHT).for_each(|_|{
-            let buf = unsafe { self.device.create_buffer(&buf_info, None).unwrap() };
-            let mem = unsafe { self.device.allocate_memory(&buf_mem_info, None).unwrap() };
+            buf = unsafe { self.device.create_buffer(&buf_info, None).unwrap() };
+            mem = unsafe { self.device.allocate_memory(&buf_mem_info, None).unwrap() };
             unsafe { self.device.bind_buffer_memory(buf,mem,0).unwrap() };
-            let map = unsafe { self.device.map_memory(mem, 0, buf_info.size, vk::MemoryMapFlags::default()).unwrap() };
+            map = unsafe { self.device.map_memory(mem, 0, buf_info.size, vk::MemoryMapFlags::default()).unwrap() };
             ubufs.push(buf);
             ubufs_mem.push(mem);
             ubufs_map.push(map);
+
+            buf = unsafe { self.device.create_buffer(&mv_buf_info, None).unwrap() };
+            mem = unsafe { self.device.allocate_memory(&mv_buf_mem_info, None).unwrap() };
+            unsafe { self.device.bind_buffer_memory(buf,mem,0).unwrap() };
+            map = unsafe { self.device.map_memory(mem, 0, mv_buf_info.size, vk::MemoryMapFlags::default()).unwrap() };
+            mv_ubufs.push(buf);
+            mv_ubufs_mem.push(mem);
+            mv_ubufs_map.push(map);
         });
 
 
@@ -240,6 +270,12 @@ impl<'a> WindowBuilder<'a> {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             };
 
+            let mv_buf_info = vk::DescriptorBufferInfo {
+                buffer: mv_ubufs[idx as usize],
+                offset: 0,
+                range: size_of::<MVBufferObject>() as u64,
+            };
+
             let descriptor_write_ubo = vk::WriteDescriptorSet {
                 dst_set: descriptor_sets[idx as usize],
                 dst_binding: 0,
@@ -259,7 +295,19 @@ impl<'a> WindowBuilder<'a> {
                 descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 p_image_info: &img_info,
                 ..Default::default()};
-            let descriptor_writes: Vec<vk::WriteDescriptorSet> = vec![descriptor_write_ubo,descriptor_write_img];
+
+            let descriptor_write_mv = vk::WriteDescriptorSet {
+                dst_set: descriptor_sets[idx as usize],
+                dst_binding: 2,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: ptr::null(),
+                p_buffer_info: &mv_buf_info,
+                p_texel_buffer_view: ptr::null(),
+                ..Default::default()};
+
+            let descriptor_writes: Vec<vk::WriteDescriptorSet> = vec![descriptor_write_ubo,descriptor_write_img,descriptor_write_mv];
             unsafe { self.device.update_descriptor_sets(descriptor_writes.as_slice(), &[]) };
         });
 
@@ -285,6 +333,9 @@ impl<'a> WindowBuilder<'a> {
             ubufs,
             ubufs_mem,
             ubufs_map,
+            mv_ubufs,
+            mv_ubufs_mem,
+            mv_ubufs_map,
             descriptor_pool,
             descriptor_sets,
             id: 0,

@@ -1,4 +1,5 @@
 #version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 
 #include <lygia/generative/voronoi.glsl>
 #include <lygia/color/hueShift.glsl>
@@ -7,8 +8,6 @@
 layout(location = 0) out vec4 color;
 layout(location = 0) in vec3 outPosition;
 layout(location = 2) in vec2 outTexCoords;
-layout(location = 3) flat in vec2 instance;
-
 
 
 layout(push_constant) uniform pc {
@@ -19,6 +18,12 @@ layout(push_constant) uniform pc {
 };
 
 layout(binding = 1) uniform sampler2D tex;
+
+layout(std140, binding = 2) buffer MVBufferObject {
+    uint64_t size;
+    ivec2 dims;
+    uint[] data;
+} mv;
 
 
 
@@ -164,14 +169,19 @@ float gs(vec3 c) {
     return dot(c,vec3(1.0/3.0));
 }
 
+float chebyshev(vec2 a, vec2 b) { return max(abs(b.x - a.x), abs(b.y - a.y)); }
+float chebyshev(vec3 a, vec3 b) { return max(chebyshev(a.xy, b.xy), abs(b.z - a.z)); }
+float taxicab(vec2 a, vec2 b) { return abs(b.x - a.x) + abs(b.y - a.y); }
+float taxicab(vec3 a, vec3 b) { return taxicab(a.xy, b.xy) + abs(b.z - a.z); }
+
+
 void main() {
     vec2 pos = outPosition.xy * vec2(aspect,1);
     vec3 C = vec3(0);
     float A = 1;
 
-
+    /*
     vec2 tex_pos = ((outPosition.xy + vec2(1))/2  * 1151.0/1200.0) * vec2((1200.0/1920.0)*aspect,1);
-
 
     vec3[3][3] identity = {
         {vec3( 0),vec3( 0),vec3( 0)},
@@ -216,14 +226,38 @@ void main() {
         {1,1,1},
         {1,-8,1},
         {1,1,1}};
+    */
 
 
-    //vec3 g1 = convolve3(ridge, tex, tex_pos);
-    //C = vec3(g1);
+    ivec2 dim = mv.dims;
+    int X = int(gl_FragCoord.x);
+    int Y = int(gl_FragCoord.y);
+    int x = 0;
+    int y = 0;
+    int margin = 16;
+    int scale = 3;
 
-    //C = vec3(texture(tex, outTexCoords));
-    C = vec3(hashRandom(instance+t));
+    //1920x1122
+
+    uint c = 0;
+    C = vec3(0.05, 0.0, 0.0875);
+    if (margin <= Y && Y < dim.y*scale) {
+        C = vec3(0.0475, 0.0, 0.125);
+        if (margin <= X && X < (dim.x*scale + margin)) {
+            x = (X - margin)/scale;
+            y = (Y - margin)/scale;
+            c = mv.data[x + y*dim.y];
+            c = mv.data[0];
+            C = vec3(c);
+        } else if ((dim.x*scale + 2*margin) <= X && X < (2*dim.x*scale + 2*margin)) {
+            x = (X - dim.x*scale - 2*margin)/scale;
+            y = (Y - margin)/scale;
+            c = mv.data[x + y*dim.y];
+            c = mv.data[1];
+            C = vec3(c);
+        }
+    }
+
     color = vec4(C*A,A);
-
 }
 

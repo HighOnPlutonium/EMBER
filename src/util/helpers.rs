@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fs::DirEntry;
 use ash::{khr, vk, Device};
 use ash::vk::{DescriptorPool, DescriptorSetLayout, Pipeline, PipelineLayout, PushConstantRange};
-use log::{error, info};
+use log::{debug, error, info};
 use shaderc::{CompilationArtifact, IncludeCallbackResult, IncludeType, ResolvedInclude};
 use winit::platform::wayland::WindowExtWayland;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
@@ -211,20 +211,26 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         ..Default::default()};
 
 
-    const UNIFORM_BUFFER_SIZE: u32 = 48;
     let pool_size_ubo = vk::DescriptorPoolSize {
         ty: vk::DescriptorType::UNIFORM_BUFFER,
-        descriptor_count: UNIFORM_BUFFER_SIZE*2, // todo!
+        descriptor_count: 3, // todo!
     };
     let pool_size_img = vk::DescriptorPoolSize {
         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         descriptor_count: 2,
     };
-    let pool_size: Vec<vk::DescriptorPoolSize> = vec![pool_size_ubo,pool_size_img];
+
+    let pool_size_mv = vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::STORAGE_BUFFER,
+        descriptor_count: 3,
+    };
+
+    let pool_size: Vec<vk::DescriptorPoolSize> = vec![pool_size_ubo,pool_size_img,pool_size_mv];
+
     let pool_info = vk::DescriptorPoolCreateInfo {
         flags: vk::DescriptorPoolCreateFlags::default(),
         max_sets: MAX_FRAMES_IN_FLIGHT,
-        pool_size_count: 2,
+        pool_size_count: pool_size.len() as u32,
         p_pool_sizes: pool_size.as_ptr(),
         ..Default::default()};
     let descriptor_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
@@ -239,7 +245,7 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
     let ubo_layout_binding = vk::DescriptorSetLayoutBinding {
         binding: 0,
         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-        descriptor_count: UNIFORM_BUFFER_SIZE, // todo!
+        descriptor_count: 3, // todo!
         stage_flags: vk::ShaderStageFlags::VERTEX,
         ..Default::default()};
 
@@ -251,7 +257,15 @@ pub(crate) unsafe fn create_graphics_pipeline(device: &Device, extent: vk::Exten
         p_immutable_samplers: ptr::null(),
         ..Default::default()};
 
-    let bindings: Vec<vk::DescriptorSetLayoutBinding> = vec![ubo_layout_binding, sampler_layout_binding];
+    let mv_layout_binding = vk::DescriptorSetLayoutBinding {
+        binding: 2,
+        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+        descriptor_count: 3,
+        stage_flags: vk::ShaderStageFlags::FRAGMENT,
+        ..Default::default()};
+
+
+    let bindings: Vec<vk::DescriptorSetLayoutBinding> = vec![ubo_layout_binding, sampler_layout_binding, mv_layout_binding];
 
     let descriptor_set_layout_info = vk::DescriptorSetLayoutCreateInfo {
         binding_count: bindings.len() as u32,
@@ -405,8 +419,6 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
     device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, &[descriptor_sets[image_index]], &[]);
 
 
-
-
     let mut data: (f32,f32,f32,f32,i32) = (
         0.0, 0.0,
         (window.inner_size().width as f32)/(window.inner_size().height as f32),
@@ -421,8 +433,7 @@ pub(crate) unsafe fn record_into_buffer(device: &Device, window: &Window, pipeli
                               push_constant_range.offset,
                               slice::from_raw_parts(ptr::from_ref(&data) as *const _, size_of_val(&data)));
 
-
-    device.cmd_draw(command_buffer,VERTICES.len() as u32,1024,0,0);
+    device.cmd_draw(command_buffer,VERTICES.len() as u32,1,0,0);
     device.cmd_end_render_pass(command_buffer);
     //because there aren't any errors thrown during command recording, everything that can go wrong will go wrong here.
     device.end_command_buffer(command_buffer).unwrap();

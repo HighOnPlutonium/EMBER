@@ -44,6 +44,7 @@ use winit::window::{WindowId, WindowLevel};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 use pipewire::properties::properties;
+use crate::util::kwin::pointer::{KWin, KWinPid};
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
@@ -88,6 +89,9 @@ const OPTIONAL_DEVICE_EXTENSIONS: [&CStr; 8] = [
 static OPT_EXT_LOCK: Mutex<Vec<&CStr>> = Mutex::new(vec![]);
 
 
+const SCREENSHARE: bool = false;
+const MV_SIZE: (usize, usize) = (312,372);
+const MV_BUF_SIZE: usize = MV_SIZE.0 * MV_SIZE.1;   //116064
 
 
 static KHR_SURFACE: LazyLock<khr::surface::Instance> = LazyLock::new(||khr::surface::Instance::new(&*ENTRY,&*INSTANCE));
@@ -485,22 +489,33 @@ fn main() -> Result<(),Box<dyn Error>>
                 pw_loop.run();
             Ok(())
         };
-        let handle: thread::JoinHandle<Result<(),Box<dyn Error + Send + Sync>>> = thread::Builder::new()
-            .name("pipewire".to_owned())
-            .spawn(fn_pw).unwrap();
-        while fd.get().is_none() {
-            thread::sleep(Duration::from_millis(100));
+        if SCREENSHARE {
+            let handle: thread::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> = thread::Builder::new()
+                .name("pipewire".to_owned())
+                .spawn(fn_pw).unwrap();
+            while fd.get().is_none() {
+                thread::sleep(Duration::from_millis(100));
+            }
         }
 
         let mem_import_info = vk::ImportMemoryFdInfoKHR {
             handle_type: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
-            fd: *fd.get().unwrap(),
+            fd: *fd.get_or_init(||0),
             ..Default::default()};
-        let mem_alloc_info = vk::MemoryAllocateInfo {
+        let mut mem_alloc_info = vk::MemoryAllocateInfo {
             p_next: ptr::from_ref(&mem_import_info).cast(),
             allocation_size: 1920*1200*4,   // todo! hardcoded shit
             memory_type_index: 0,
             ..Default::default()};
+
+        if !SCREENSHARE {
+            mem_alloc_info = vk::MemoryAllocateInfo {
+                p_next: ptr::null(),
+                allocation_size: 1920*1200*4,
+                memory_type_index: 0,
+                ..Default::default()};
+        }
+
         let mem = device.allocate_memory(&mem_alloc_info, None)?;
 
         let format_modifiers = vec![DrmFourcc::Abgr8888 as u64, DrmModifier::Linear.into()];
@@ -512,7 +527,7 @@ fn main() -> Result<(),Box<dyn Error>>
             p_next: ptr::from_ref(&drm_format_modifier_list).cast(),
             handle_types: vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
             ..Default::default()};
-        let img_info = vk::ImageCreateInfo {
+        let mut img_info = vk::ImageCreateInfo {
             p_next: ptr::from_ref(&ext_img_info).cast(),
             flags: {
                 type Flags = vk::ImageCreateFlags;
@@ -532,6 +547,11 @@ fn main() -> Result<(),Box<dyn Error>>
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             initial_layout: vk::ImageLayout::UNDEFINED,
             ..Default::default()};
+
+        if !SCREENSHARE {
+            img_info.p_next = ptr::null();
+            img_info.tiling = vk::ImageTiling::LINEAR;
+        }
         let img = device.create_image(&img_info, None)?;
 
         device.bind_image_memory(img, mem, 0)?;
@@ -599,6 +619,8 @@ fn main() -> Result<(),Box<dyn Error>>
         screencast: Some(holder),
         ctrl_vals: [[0.0,0.0,2.0],[0.0,0.0,0.0,],[0.0,0.0,0.0],[0.0,0.0,0.0]],
         mode: 0,
+
+        kwin: KWin::get(unsafe { KWinPid::search(true) }),
     })
     {
         Ok(_) => Ok(()),
@@ -634,6 +656,8 @@ pub(crate) struct App {
     screencast: Option<SCHolder>,
     ctrl_vals: [[f32;3];4],
     mode: usize,
+
+    kwin: KWin,
 }
 
 struct ExtensionHolder {
@@ -688,6 +712,13 @@ struct UniformBufferObject {
     model: glm::Mat4,
     view: glm::Mat4,
     proj: glm::Mat4,
+}
+
+#[repr(C)]
+struct MVBufferObject {
+    buffer_size: u64,
+    dimensions: glm::IVec2,
+    data: [u32; MV_BUF_SIZE],
 }
 
 
@@ -815,7 +846,7 @@ impl ApplicationHandler for App {
                     format!("ID {}",unsafe {mem::transmute_copy::<_,isize>(&window_id) }).bright_purple());
 
                 let PerWindow {surface,layout,pipeline,render_pass,swapchain,vertex_buffer,vertex_buffer_mem,
-                    ubufs,ubufs_mem,descriptor_set_layout,descriptor_pool, .. }
+                    ubufs,ubufs_mem,descriptor_set_layout,descriptor_pool,mv_ubufs,mv_ubufs_mem,.. }
                     = self.windows.remove(&window_id).unwrap();
                 unsafe {
                     //VERY IMPORTANT! otherwise, we'd try cleaning up semaphores n stuff while they're still in use
@@ -833,6 +864,13 @@ impl ApplicationHandler for App {
                         self.device.destroy_buffer(*buf, None);
                     });
 
+                    mv_ubufs_mem.iter().for_each(|mem|{
+                       self.device.unmap_memory(*mem);
+                    });
+                    mv_ubufs.iter().for_each(|buf|{
+                       self.device.destroy_buffer(*buf, None);
+                    });
+
                     self.device.destroy_descriptor_pool(descriptor_pool, None);
                     self.device.destroy_descriptor_set_layout(descriptor_set_layout,None);
 
@@ -845,6 +883,7 @@ impl ApplicationHandler for App {
                 if self.windows.len() == 0 { event_loop.exit() };
             }
             WindowEvent::Resized(size) => {
+                debug!("{:?}",size);
                 //should probably do some of the swapchain recreation here
                 //although that's left for a later date: todo!
                 self.resized = true;
@@ -891,6 +930,8 @@ impl ApplicationHandler for App {
                     push_constant_range,
                     ubufs,
                     ubufs_map,
+                    mv_ubufs,
+                    mv_ubufs_map,
                     descriptor_sets,
                     id,
                     ..
@@ -899,35 +940,56 @@ impl ApplicationHandler for App {
                 unsafe { device.reset_fences(&[swapchain.sync[self.current_frame].in_flight]).unwrap() };
 
                 let map = unsafe { ubufs_map[self.current_frame].cast::<UniformBufferObject>().as_mut().unwrap() };
-
-
                 let [[cx,cy,cz],[cu,cv,cw],[ox,oy,oz],[ou,ov,ow]] = self.ctrl_vals;
                 let aspect = (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
-
                 map.model = glm::mat4(
                     1.0,    0.0,    0.0,    0.0,
                     0.0,    1.0,    0.0,    0.0,
                     0.0,    0.0,    1.0,    0.0,
                     ox,    oy,    oz,    1.0);
-
                 map.model = glm::ext::rotate(&map.model, ou, glm::vec3(1.0,0.0,0.0));
                 map.model = glm::ext::rotate(&map.model, ov, glm::vec3(0.0,1.0,0.0));
                 map.model = glm::ext::rotate(&map.model, ow, glm::vec3(0.0,0.0,1.0));
-
-
                 map.view = glm::mat4(
                     1.0,    0.0,    0.0,    0.0,
                     0.0,    1.0,    0.0,    0.0,
                     0.0,    0.0,    1.0,    0.0,
                     -cx,    -cy,    -cz,    1.0);
-
                 map.view = glm::ext::rotate(&map.view, cu, glm::vec3(1.0,0.0,0.0));
                 map.view = glm::ext::rotate(&map.view, cv, glm::vec3(0.0,1.0,0.0));
                 map.view = glm::ext::rotate(&map.view, cw, glm::vec3(0.0,0.0,1.0));
-
-
                 map.proj = glm::ext::perspective(FOV.to_radians(), aspect, NEAR, FAR);
 
+                let map = unsafe { mv_ubufs_map[self.current_frame].cast::<MVBufferObject>().as_mut().unwrap() };
+                map.buffer_size = MV_BUF_SIZE as u64;
+                map.dimensions = glm::IVec2::new(MV_SIZE.0 as i32, MV_SIZE.1 as i32);
+                let mut buffer = Vec::<u32>::with_capacity(MV_BUF_SIZE);
+
+                let pid = self.kwin.1;
+                let mut addr: *mut c_void = ptr::null_mut();
+                let mut data = 0u32;
+                let mut data_ptr: *mut c_void = ptr::from_mut(&mut data).cast();
+                let mut ret: i64 = 0;
+                unsafe { ret = libc::ptrace(libc::PTRACE_SEIZE, pid, addr, data_ptr) };
+                data_ptr = ptr::null_mut();
+                let mut num = 0u32;
+
+                addr = self.kwin.1;
+                addr = unsafe { addr.byte_add(self.kwin.2.workspace) };
+
+                for i in 0..MV_BUF_SIZE {
+                    num = 0u32;
+                    addr = unsafe { addr.byte_add(8) };
+                    unsafe { ret = libc::ptrace(libc::PTRACE_SEIZE, pid, addr.byte_add(4), data_ptr) };
+                    num |= (ret as u32) << 16;
+                    unsafe { ret = libc::ptrace(libc::PTRACE_SEIZE, pid, addr.byte_add(6), data_ptr) };
+                    num |= (ret as u32);
+                    num = (((-1i32).pow(i as u32) + 1) as u32)/2;
+                    buffer.push(num);
+                }
+                addr = ptr::null_mut();
+                unsafe { ret = libc::ptrace(libc::PTRACE_DETACH, pid, addr, data_ptr) };
+                map.data = unsafe { buffer.as_ptr().cast::<[u32;MV_BUF_SIZE]>().read() };
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };
                 unsafe { record_into_buffer(device, window, *pipeline, *render_pass, swapchain.framebuffers[next as usize],
