@@ -1,10 +1,11 @@
+use std::error::Error;
 use std::ffi;
 use std::ffi::CStr;
-use std::fmt::Display;
+use std::fmt::{Debug, Display, Formatter};
 use ash::vk;
 use colored::{Color, ColoredString, Colorize};
 
-use log::{debug, error, info, kv, trace, warn, Level, Log, Metadata, Record};
+use log::{debug, error, info, trace, warn, Level, Log, Metadata, Record};
 use log::kv::Key;
 
 pub struct ConsoleLogger;
@@ -147,15 +148,4 @@ pub(crate) unsafe extern "system" fn debug_reporter(
         }
     }
     false.into()
-}
-
-
-
-
-pub trait Logged<T> {
-    fn logged(self, msg: &str) -> T;
-}
-impl<T,E:Display> Logged<T> for Result<T,E> {
-    // todo!("add cleanup calls")
-    fn logged(self, msg: &str) -> T {  self.unwrap_or_else(|e| { error!("{}: {}",msg,e); panic!() }) }
 }

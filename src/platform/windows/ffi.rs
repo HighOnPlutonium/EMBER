@@ -54,7 +54,3 @@ impl WCAData {
 pub enum WCAttribute {
     WCA_ACCENT_POLICY { state: u32, flags: u32, gradient: u32, animation: u32 } = 19
 }
-
-
-
-

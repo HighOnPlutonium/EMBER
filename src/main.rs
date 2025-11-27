@@ -2,6 +2,7 @@ extern crate core;
 
 mod util;
 mod experimental;
+mod platform;
 
 use std::collections::HashMap;
 use util::per_window::PerWindow;
