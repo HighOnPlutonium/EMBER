@@ -6,9 +6,6 @@ pub(crate) mod ffi;
 pub(crate) mod ffi {
     use crate::platform::{platform_mismatch, Platform};
 
-    use libloading::Library;
-    use std::os::raw::c_void;
-
     type HWND = isize;
     #[allow(unused)]
     pub struct WindowsFFI {
@@ -17,7 +14,7 @@ pub(crate) mod ffi {
     }
     impl WindowsFFI {
         pub unsafe fn load_function_pointers() -> Self {
-            crate::platform::platform_mismatch(crate::platform::Platform::WINDOWS)
+            platform_mismatch(Platform::WINDOWS)
         }
     }
 
@@ -35,7 +32,7 @@ pub(crate) mod ffi {
     }
     impl WCAData {
         pub unsafe fn new(_attribute: &mut WCAttribute) -> Self {
-            crate::platform::platform_mismatch(crate::platform::Platform::WINDOWS)
+            platform_mismatch(Platform::WINDOWS)
         }
     }
 }

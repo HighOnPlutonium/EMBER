@@ -1,6 +1,6 @@
 #![warn(unsafe_op_in_unsafe_fn)]
 
-use libc::{iovec, process_vm_readv, ptrace, PTRACE_PEEKDATA, PTRACE_SEIZE};
+use libc::iovec;
 use std::{ffi::c_void, fs::File, io::Read, mem, process::Command, ptr, slice};
 use errno::errno;
 use log::{error, trace};
@@ -10,7 +10,7 @@ use log::{error, trace};
 pub unsafe fn libkwin_base_address(pid: usize) -> *mut c_void {
     let mut buffer = String::new();
     // require root permissions
-    File::open(&format!("/proc/{}/maps", pid.0))
+    File::open(&format!("/proc/{}/maps", pid))
         .unwrap_or_else(|e| panic!("cannot open file (require permissions?)\n{:?}", e))
         .read_to_string(&mut buffer)
         .unwrap();
@@ -22,10 +22,10 @@ pub unsafe fn libkwin_base_address(pid: usize) -> *mut c_void {
     
     subslice.iter().for_each(|x|trace!("{}",x));
 
-    return usize::from_str_radix(&subslice[0][..12], 16).unwrap() as *mut c_void;
+    usize::from_str_radix(&subslice[0][..12], 16).unwrap() as *mut c_void
 }
 
-pub fn get_mouse_pos(pid: usize, base: *mut c_void, offset: usize) -> [u8; 16] {
+pub fn get_mouse_pos(pid: i32, base: *mut c_void, offset: usize) -> [u8; 16] {
     let mut cursors_addr = ptr::null_mut::<c_void>();
     let local = iovec {
         iov_base: ptr::from_mut(&mut cursors_addr).cast(),
@@ -59,7 +59,7 @@ pub fn get_mouse_pos(pid: usize, base: *mut c_void, offset: usize) -> [u8; 16] {
         -1 => {
             error!("{}", errno());
         }
-        x => unreachable!()
+        _ => unreachable!()
     }
 
     let mut pos = [0u8; 16];
@@ -77,7 +77,7 @@ pub fn get_mouse_pos(pid: usize, base: *mut c_void, offset: usize) -> [u8; 16] {
         -1 => {
             error!("{}", errno());
         }
-        x => unreachable!()
+        _ => unreachable!()
     }
     pos
 }

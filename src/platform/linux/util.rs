@@ -3,6 +3,7 @@ use std::process::Command;
 use log::{error, info, warn};
 
 pub fn get_pid(name: &str, all_users: bool) -> Result<usize, Box<dyn Error>> {
+    let name = name.trim();
     Ok(String::from_utf8_lossy(
         &Command::new("ps")
             .arg(if all_users { "ax" } else { "x" })
@@ -11,7 +12,7 @@ pub fn get_pid(name: &str, all_users: bool) -> Result<usize, Box<dyn Error>> {
         .lines()
         .filter(|x| x.contains(format!("/{} ", name).as_str()))
         .next()
-        .ok_or("Process \"{}\" not found")?
+        .ok_or_else(||{ error!("No Process named \"{}\" found", name); panic!() }).unwrap()
         .trim()
         .split_once(' ')
         .unwrap()
@@ -19,13 +20,13 @@ pub fn get_pid(name: &str, all_users: bool) -> Result<usize, Box<dyn Error>> {
 }
 
 
-pub struct Root(i32);
+pub struct Root(u32);
 impl Root {
     pub fn new() -> Self {
-        Root(libc::getuid())
+        unsafe { Root(libc::getuid() ) }
     }
 
-    pub fn claim(&mut self) {
+    pub unsafe fn claim(&mut self) {
         if libc::getuid() == 0 {
             warn!("Unnecessary root claim");
         }
@@ -36,8 +37,8 @@ impl Root {
         warn!("Claimed root");
     }
 
-    pub fn release(&mut self) {
-        let uid: i32 = libc::getuid();
+    pub unsafe fn release(&mut self) {
+        let uid = libc::getuid();
         if uid == 0 {
             libc::setuid(self.0);
             info!("Released root");

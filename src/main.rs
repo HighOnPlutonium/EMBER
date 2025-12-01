@@ -1,5 +1,3 @@
-extern crate core;
-
 mod util;
 mod experimental;
 mod platform;
@@ -9,10 +7,9 @@ use util::per_window::PerWindow;
 
 use crate::experimental::Antistatic;
 use crate::util::helpers::{record_into_buffer, recreate_swapchain};
-use crate::util::logging::{ConsoleLogger, Logged};
+use crate::util::logging::{ConsoleLogger, UnwrapLog};
 use crate::util::per_window::WindowBuilder;
 use crate::util::swapchain::PerSwapchain;
-use crate::util::windows_ffi::WindowsFFI;
 use ash::vk::{Handle, PFN_vkAllocateMemory};
 use ash::Instance;
 use ash::{ext, vk};
@@ -43,9 +40,9 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHand
 use winit::window::{WindowId, WindowLevel};
 
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::process::exit;
 use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 use pipewire::properties::properties;
-use crate::util::kwin::pointer::{KWin, KWinPid};
 
 const APPLICATION_TITLE: &str = "EMBER";
 const WINDOW_COUNT: usize = 1;
@@ -111,9 +108,27 @@ fn main() -> Result<(),Box<dyn Error>>
     #[cfg(windows)]
     ansi_term::enable_ansi_support().unwrap();
     unsafe { env::set_var("COLORTERM","truecolor"); }
-
     log::set_logger(&LOGGER)?;
     log::set_max_level(LevelFilter::Trace);
+
+
+    #[allow(unused_imports)]
+    use platform::{linux, windows};
+
+    let mut root = linux::util::Root::new();
+    unsafe { root.claim() };
+
+    let pid = linux::util::get_pid("kwin_wayland", true)?;
+    println!("{}",pid);
+    let tmp = unsafe { linux::vmem::VmMapping::from_pid(pid) };
+
+    unsafe { root.release() };
+    println!("{}",tmp);
+    exit(0);
+
+
+
+
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(event_loop::ControlFlow::Poll);
@@ -275,13 +290,13 @@ fn main() -> Result<(),Box<dyn Error>>
         p_enabled_features: &device_features,
         ..Default::default()};
     info!("Creating logical device over physical device {}",phys_device_properties.device_name_as_c_str()?.to_str()?.bright_purple());
-    let device = unsafe { INSTANCE.create_device(phys_device, &device_create_info, None).logged("Logical device creation failed") };
+    let device = unsafe { INSTANCE.create_device(phys_device, &device_create_info, None).log() };
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
 
 
     let extension_holder = {
-        let opt_ext_lock = OPT_EXT_LOCK.lock().unwrap();
+        let opt_ext_lock = OPT_EXT_LOCK.lock()?;
         ExtensionHolder {
             surface: khr::surface::Instance::new(&ENTRY,&INSTANCE),
             os_surface: match event_loop.display_handle()?.as_raw() {
@@ -319,7 +334,7 @@ fn main() -> Result<(),Box<dyn Error>>
         flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
         queue_family_index,
         ..Default::default()};
-    let command_pool = unsafe { device.create_command_pool(&command_pool_info,None).unwrap() };
+    let command_pool = unsafe { device.create_command_pool(&command_pool_info,None).log() };
 
 
     let mut debug_messenger: Option<vk::DebugUtilsMessengerEXT> = None;
@@ -339,8 +354,8 @@ fn main() -> Result<(),Box<dyn Error>>
 
     let mut holder = SCHolder::default();
     unsafe {
-        let mut fd = Arc::new(OnceLock::<i32>::new());
-        let mut fd_clone = fd.clone();
+        let fd = Arc::new(OnceLock::<i32>::new());
+        let fd_clone = fd.clone();
         let fn_pw = || {
                 use pipewire;
                 use portal_screencast_waycap;
@@ -491,9 +506,9 @@ fn main() -> Result<(),Box<dyn Error>>
             Ok(())
         };
         if SCREENSHARE {
-            let handle: thread::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> = thread::Builder::new()
+            let _handle: thread::JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> = thread::Builder::new()
                 .name("pipewire".to_owned())
-                .spawn(fn_pw).unwrap();
+                .spawn(fn_pw)?;
             while fd.get().is_none() {
                 thread::sleep(Duration::from_millis(100));
             }
@@ -609,7 +624,6 @@ fn main() -> Result<(),Box<dyn Error>>
         windows: HashMap::with_capacity(WINDOW_COUNT),
 
         ext: extension_holder,
-        win32_fp: None,
 
         debug_messenger,
         debug_reporter,
@@ -620,8 +634,6 @@ fn main() -> Result<(),Box<dyn Error>>
         screencast: Some(holder),
         ctrl_vals: [[0.0,0.0,2.0],[0.0,0.0,0.0,],[0.0,0.0,0.0],[0.0,0.0,0.0]],
         mode: 0,
-
-        kwin: KWin::get(unsafe { KWinPid::search(true) }),
     })
     {
         Ok(_) => Ok(()),
@@ -646,7 +658,6 @@ pub(crate) struct App {
     windows: HashMap<WindowId,PerWindow>,
 
     ext: ExtensionHolder,
-    win32_fp: Option<WindowsFFI>,
 
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     debug_reporter: Option<vk::DebugReportCallbackEXT>,
@@ -657,8 +668,6 @@ pub(crate) struct App {
     screencast: Option<SCHolder>,
     ctrl_vals: [[f32;3];4],
     mode: usize,
-
-    kwin: KWin,
 }
 
 struct ExtensionHolder {
@@ -965,7 +974,7 @@ impl ApplicationHandler for App {
                 map.buffer_size = MV_BUF_SIZE as u64;
                 map.dimensions = glm::IVec2::new(MV_SIZE.0 as i32, MV_SIZE.1 as i32);
                 let mut buffer = Vec::<u32>::with_capacity(MV_BUF_SIZE);
-
+                /*
                 let pid = self.kwin.1;
                 let mut addr: *mut c_void = ptr::null_mut();
                 let mut data = 0u32;
@@ -989,7 +998,7 @@ impl ApplicationHandler for App {
                     buffer.push(num);
                 }
                 addr = ptr::null_mut();
-                unsafe { ret = libc::ptrace(libc::PTRACE_DETACH, pid, addr, data_ptr) };
+                unsafe { ret = libc::ptrace(libc::PTRACE_DETACH, pid, addr, data_ptr) }; */
                 map.data = unsafe { buffer.as_ptr().cast::<[u32;MV_BUF_SIZE]>().read() };
 
                 unsafe { device.reset_command_buffer(command_buffers[self.current_frame],Default::default()).unwrap() };

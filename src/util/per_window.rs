@@ -2,16 +2,14 @@ use core::ffi;
 use std::error::Error;
 use std::ffi::c_void;
 use std::ptr;
-use crate::util::windows_ffi::{WCAData, WCAttribute, WindowsFFI};
 use ash::{vk, Device};
 use ash::util::Align;
-use log::{debug, error};
+use log::error;
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::{ExtensionHolder, MVBufferObject, OSSurface, SCHolder, UniformBufferObject, FAR, FOV, INSTANCE, MAX_FRAMES_IN_FLIGHT, NEAR};
+use crate::{platform, ExtensionHolder, MVBufferObject, OSSurface, SCHolder, UniformBufferObject, FAR, FOV, INSTANCE, MAX_FRAMES_IN_FLIGHT, NEAR};
 use crate::util::helpers::{create_framebuffers, create_graphics_pipeline, create_render_pass, create_views, Vertex, VERTICES};
-use crate::util::logging::Logged;
 use crate::util::swapchain::PerSwapchain;
 
 
@@ -102,7 +100,7 @@ impl<'a> WindowBuilder<'a> {
                         hwnd: hwnd.hwnd.get(),
                         hinstance: hwnd.hinstance.unwrap().into(),
                         ..Default::default()};
-                    instance.create_win32_surface(&create_info, None).logged("Surface creation failure")
+                    instance.create_win32_surface(&create_info, None).unwrap()
                 }
                 OSSurface::WAYLAND(instance) => {
                     let RawWindowHandle::Wayland(mut hwnd) = window_handle else { error!("Window/Display Handles don't match. Just no."); panic!() };
@@ -111,7 +109,7 @@ impl<'a> WindowBuilder<'a> {
                         display: hdsp.display.as_mut(),
                         surface: hwnd.surface.as_mut(),
                         ..Default::default()};
-                    instance.create_wayland_surface(&create_info,None).logged("Surface creation failure")
+                    instance.create_wayland_surface(&create_info,None).unwrap()
                 }
                 OSSurface::XCB(instance) => {
                     let RawWindowHandle::Xcb(hwnd) = window_handle else { error!("Window/Display Handles don't match. Just no."); panic!() };
@@ -120,7 +118,7 @@ impl<'a> WindowBuilder<'a> {
                         connection: hdsp.connection.unwrap().as_mut(),
                         window: hwnd.window.into(),
                         ..Default::default()};
-                    instance.create_xcb_surface(&create_info,None).logged("Surface creation failure")
+                    instance.create_xcb_surface(&create_info,None).unwrap()
                 }
                 OSSurface::XLIB(instance) => {
                     let RawWindowHandle::Xlib(hwnd) = window_handle else { error!("Window/Display Handles don't match. Just no."); panic!() };
@@ -129,7 +127,7 @@ impl<'a> WindowBuilder<'a> {
                         dpy: hdsp.display.unwrap().as_mut(),
                         window: hwnd.window,
                         ..Default::default()};
-                    instance.create_xlib_surface(&create_info,None).logged("Surface creation failure")
+                    instance.create_xlib_surface(&create_info,None).unwrap()
                 }
             }
         };
@@ -354,17 +352,17 @@ impl<'a> WindowBuilder<'a> {
 
 impl PerWindow {
 
-    pub fn toggle_blur(&self, function_pointers: &WindowsFFI) {
+    pub fn toggle_blur(&self, function_pointers: &platform::windows::ffi::WindowsFFI) {
         if let RawWindowHandle::Win32(handle) = self.window.window_handle().unwrap().as_raw() {
-            let mut attribute = WCAttribute::WCA_ACCENT_POLICY { state: 3, flags: 480, gradient: 0, animation: 0 };
+            let mut attribute = platform::windows::ffi::WCAttribute::WCA_ACCENT_POLICY { 
+                state: 3, flags: 480, gradient: 0, animation: 0 };
             unsafe {
                 (function_pointers.set_window_composition_attribute)(
                     HWND::from(handle.hwnd),
-                    std::ptr::from_mut(&mut WCAData::new(&mut attribute))
+                    std::ptr::from_mut(&mut platform::windows::ffi::WCAData::new(&mut attribute))
                 ); //.then_some(()).expect("failure from function pointer call")
             }
             return
-
         };
         panic!("Severe lack of Win32 window handles");
     }

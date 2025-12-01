@@ -97,6 +97,38 @@ impl Log for ConsoleLogger {
     }
 }
 
+
+
+pub trait UnwrapLog<T> {
+    fn log(self) -> T;
+}
+pub trait DebugLog {
+    fn dbg(self) -> Self where Self: Sized + Debug {
+        debug!("QUICK-DBG - {:?}", self);
+        self
+    }
+}
+
+impl<T, E: Error> UnwrapLog<T> for Result<T,E> {
+    fn log(self) -> T {
+        self.unwrap_or_else(|e| {
+            error!("QUICK-ERR - {}", e);
+            panic!()
+        })
+    }
+}
+
+impl<T> UnwrapLog<T> for Option<T> {
+    fn log(self) -> T {
+        self.unwrap_or_else(|| {
+            error!("QUICK-ERR - Unwrapped \"None\"-vaue!");
+            panic!()
+        })
+    }
+}
+
+
+
 pub const DBG_UTILS: u64  = 1;
 pub const DBG_REPORT: u64 = 2;
 
