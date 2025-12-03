@@ -2,20 +2,20 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io::Read;
 use std::fmt::{Debug, Display, Formatter};
+use std::ops::Deref;
 use bitflags::bitflags;
-
 
 
 pub(crate) struct VmMapping {
     inner: Vec<VmMapEntry>,
 }
 pub(crate) struct VmMapEntry {
-    address: (*mut c_void, *mut c_void),    // (64bit,64bit) = 128bit
-    permissions: Permissions,   //u8
-    offset: u64,
-    device: (u16,u16),    // hex as  ma:mi major-minor
-    inode: u32,
-    pathname: VmPath,
+    pub address: (*mut c_void, *mut c_void),    // (64bit,64bit) = 128bit
+    pub permissions: Permissions,   //u8
+    pub offset: u64,
+    pub device: (u16,u16),    // hex as  ma:mi major-minor
+    pub inode: u32,
+    pub pathname: VmPath,
 }
 pub enum VmPath {
     PATH(String), //a path.
@@ -101,7 +101,6 @@ impl Display for VmMapping {
         f.write_str("}")
     }
 }
-
 impl Debug for VmMapping {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.to_string().as_str())
@@ -146,69 +145,76 @@ impl Debug for VmPath {
     }
 }
 
-
-
 impl VmMapping {
-    pub unsafe fn from_pid(pid: usize) -> Self {
+    pub(crate) unsafe fn from_pid(pid: usize) -> Self {
         let mut buf = String::new();
         // require root permissions
         File::open(&format!("/proc/{}/maps", pid))
             .unwrap_or_else(|e| panic!("cannot open file (require permissions?)\n{:?}", e))
             .read_to_string(&mut buf).unwrap();
 
-        let data = buf.split_terminator('\n');
-
-        let inner: Vec<VmMapEntry> = data.map(|data| {
-            let mut data = data.split(' ');
-            VmMapEntry {
-                address: {
-                    let addr = data.next().unwrap().split_once('-').unwrap();
-                    (usize::from_str_radix(addr.0, 16).unwrap() as *mut c_void,
-                     usize::from_str_radix(addr.1, 16).unwrap() as *mut c_void)
-                },
-                permissions: Permissions::deserialize(data.next().unwrap()),
-                offset: u64::from_str_radix(data.next().unwrap(), 16).unwrap(),
-                device: {
-                    let device = data.next().unwrap().split_once(':').unwrap();
-                    (u16::from_str_radix(device.0, 16).unwrap(),
-                     u16::from_str_radix(device.1, 16).unwrap())
-                },
-                inode: data.next().unwrap().parse::<u32>().unwrap(),
-                pathname: {
-                    let path_raw = data.last().unwrap();
-                    if let Some(idx) = path_raw.find(':') {
-                        let path = path_raw[idx+1..path_raw.len()].to_string();
-                        if idx == 4 {
-                            VmPath::ANON(path)
-                        } else {
-                            match &path_raw[5..10] {
-                                "shmem" => VmPath::ANON_SHMEM(path),
-                                "inode" => VmPath::ANON_INODE(path),
-                                &_ => unreachable!()
-                            }
-                        }
-                    } else {
-                        match path_raw {
-                            "[vvar]" => VmPath::VVAR,
-                            "[vvar_vclock]" => VmPath::VVAR_VCLOCK,
-                            "[vsyscall]" => VmPath::VSYSCALL,
-                            "[stack]" => VmPath::STACK,
-                            "[vdso]" => VmPath::VDSO,
-                            "[heap]" => VmPath::HEAP,
-                            "" => VmPath::UNKNOWN,
-                            path => {
-                                if let Some(idx) = path.rfind("(deleted)") {
-                                    VmPath::DELETED(path[..idx.saturating_sub(1)].to_string())
-                                } else {
-                                    VmPath::PATH(path.to_string())
+        Self {
+            inner: buf
+                .split_terminator('\n')
+                .map(|data| {
+                let mut data = data.split(' ');
+                VmMapEntry {
+                    address: {
+                        let addr = data.next().unwrap().split_once('-').unwrap();
+                        (usize::from_str_radix(addr.0, 16).unwrap() as *mut c_void,
+                         usize::from_str_radix(addr.1, 16).unwrap() as *mut c_void)
+                    },
+                    permissions: Permissions::deserialize(data.next().unwrap()),
+                    offset: u64::from_str_radix(data.next().unwrap(), 16).unwrap(),
+                    device: {
+                        let device = data.next().unwrap().split_once(':').unwrap();
+                        (u16::from_str_radix(device.0, 16).unwrap(),
+                         u16::from_str_radix(device.1, 16).unwrap())
+                    },
+                    inode: data.next().unwrap().parse::<u32>().unwrap(),
+                    pathname: {
+                        let path_raw = data.last().unwrap();
+                        if let Some(idx) = path_raw.find(':') {
+                            let path = path_raw[idx+1..path_raw.len()].to_string();
+                            if idx == 4 {
+                                VmPath::ANON(path)
+                            } else {
+                                match &path_raw[5..10] {
+                                    "shmem" => VmPath::ANON_SHMEM(path),
+                                    "inode" => VmPath::ANON_INODE(path),
+                                    &_ => unreachable!()
                                 }
                             }
-                        }}
-        }}}).collect();
-        Self { inner }
+                        } else {
+                            match path_raw {
+                                "[vvar]" => VmPath::VVAR,
+                                "[vvar_vclock]" => VmPath::VVAR_VCLOCK,
+                                "[vsyscall]" => VmPath::VSYSCALL,
+                                "[stack]" => VmPath::STACK,
+                                "[vdso]" => VmPath::VDSO,
+                                "[heap]" => VmPath::HEAP,
+                                "" => VmPath::UNKNOWN,
+                                path => {
+                                    if let Some(idx) = path.rfind("(deleted)") {
+                                        VmPath::DELETED(path[..idx.saturating_sub(1)].to_string())
+                                    } else {
+                                        VmPath::PATH(path.to_string())
+                                    }
+                                }
+                            }}
+                    }}})
+                .collect::<Vec<VmMapEntry>>()
+        }
     }
 }
 
+impl Deref for VmMapping {
+    type Target = Vec<VmMapEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref()
+    }
+}
 
 /*
 pub(crate) struct PTrace {

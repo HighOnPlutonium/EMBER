@@ -121,9 +121,19 @@ fn main() -> Result<(),Box<dyn Error>>
     let pid = linux::util::get_pid("kwin_wayland", true)?;
     println!("{}",pid);
     let tmp = unsafe { linux::vmem::VmMapping::from_pid(pid) };
+    println!("{}",tmp);
+
+    let map = tmp.iter()
+        .filter(|entry| {
+            if let linux::vmem::VmPath::PATH(ref path) = &entry.pathname {
+                return path.contains("libkwin");
+            }
+            return false;
+        });
+    println!("\n\n");
+    map.clone().for_each(|entry|println!("{}",entry));
 
     unsafe { root.release() };
-    println!("{}",tmp);
     exit(0);
 
 
