@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::cell::{LazyCell, OnceCell, UnsafeCell};
 use std::error::Error;
 use std::ffi::{c_char, c_void, CStr};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{ControlFlow, Deref};
@@ -39,9 +39,13 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::{WindowId, WindowLevel};
 
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::process::exit;
+use rand::Rng;
+#[cfg(target_os = "linux")]
 use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
+#[cfg(target_os = "linux")]
 use pipewire::properties::properties;
 
 const APPLICATION_TITLE: &str = "EMBER";
@@ -101,9 +105,73 @@ static DISPLAY_HANDLE: Antistatic<RawDisplayHandle> = Antistatic::new();
 static       INSTANCE: Antistatic<Instance>         = Antistatic::new();
 
 
-
 static LOGGER: ConsoleLogger = ConsoleLogger;
-fn main() -> Result<(),Box<dyn Error>>
+
+
+fn main() -> Result<(),Box<dyn Error>> {
+    #[cfg(windows)]
+    ansi_term::enable_ansi_support().unwrap();
+    unsafe { env::set_var("COLORTERM","truecolor"); }
+    log::set_logger(&LOGGER)?;
+    log::set_max_level(LevelFilter::Trace);
+
+    #[cfg(target_os = "linux")]
+    {
+
+    }
+    #[cfg(windows)]
+    {
+
+    }
+
+    let mut lock = std::io::stdout().lock();
+    let mut rng = rand::rng();
+    let mut rndm = (&mut rng).random_iter::<(u8,u8,u8,u8)>().map(|(t,x,y,z)|{
+        if t < 51 { ' ' }
+        else if t < 102 { '░' }
+        else if t < 153 { '▒' }
+        else if t < 204 { '▓' }
+        else { '█' }
+    });
+    let map = format!("\n {}\n {}\n {}\n {}\n {}\n {}\n",
+                      rndm.by_ref().take(19).collect::<String>(),
+                      rndm.by_ref().take(19).collect::<String>(),
+                      rndm.by_ref().take(19).collect::<String>(),
+                      rndm.by_ref().take(19).collect::<String>(),
+                      rndm.by_ref().take(19).collect::<String>(),
+                      rndm.by_ref().take(19).collect::<String>());
+
+
+    let hex: &str = "
+ ━━━━━  ━━━━━  ━━ ━━
+ ━━ ━━  ━━━━━  ━━ ━━
+ ━━━━━  ━━ ━━  ━━ ━━
+ ━━━━━  ━━━━━  ━━ ━━
+ ━━━━━  ━━ ━━  ━━ ━━
+ ━━ ━━  ━━ ━━  ━━ ━━
+";
+    let red = format!("{}","█▓▒░".red());
+    let blue = format!("{}","█▓▒░".blue());
+    let green = format!("{}","█▓▒░".green());
+    lock.write_fmt(format_args!("{}", map))?;
+    lock.write_fmt(format_args!("{}", hex))?;
+    loop {
+        thread::sleep(Duration::from_millis(15));
+        let map = format!("\n {}\n {}\n {}\n {}\n {}\n {}\n",
+                          rndm.by_ref().take(19).collect::<String>(),
+                          rndm.by_ref().take(19).collect::<String>(),
+                          rndm.by_ref().take(19).collect::<String>(),
+                          rndm.by_ref().take(19).collect::<String>(),
+                          rndm.by_ref().take(19).collect::<String>(),
+                          rndm.by_ref().take(19).collect::<String>());
+        lock.write_fmt(format_args!("{}", map))?;
+        lock.write_fmt(format_args!("{}", hex))?;
+    }
+    Ok(())
+}
+
+#[cfg(false)]
+fn _main() -> Result<(),Box<dyn Error>>
 {
     #[cfg(windows)]
     ansi_term::enable_ansi_support().unwrap();
@@ -111,7 +179,8 @@ fn main() -> Result<(),Box<dyn Error>>
     log::set_logger(&LOGGER)?;
     log::set_max_level(LevelFilter::Trace);
 
-
+    #[cfg(target_os = "linux")]
+    {
     #[allow(unused_imports)]
     use platform::{linux, windows};
 
@@ -134,8 +203,12 @@ fn main() -> Result<(),Box<dyn Error>>
     map.clone().for_each(|entry|println!("{}",entry));
 
     unsafe { root.release() };
-    exit(0);
+    }
+    #[cfg(windows)]
+    {
 
+    }
+    return Ok(());
 
 
 

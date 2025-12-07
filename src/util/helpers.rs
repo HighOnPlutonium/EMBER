@@ -6,6 +6,7 @@ use ash::{khr, vk, Device};
 use ash::vk::{DescriptorPool, DescriptorSetLayout, Pipeline, PipelineLayout, PushConstantRange};
 use log::{debug, error, info};
 use shaderc::{CompilationArtifact, IncludeCallbackResult, IncludeType, ResolvedInclude};
+#[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowExtWayland;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::window::Window;
