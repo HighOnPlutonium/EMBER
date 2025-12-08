@@ -106,73 +106,21 @@ static       INSTANCE: Antistatic<Instance>         = Antistatic::new();
 
 
 static LOGGER: ConsoleLogger = ConsoleLogger;
+const HEX: &str = "
+    ━━━━━  ━━━━━  ━━ ━━
+    ━━ ━━  ━━━━━  ━━ ━━
+    ━━━━━  ━━ ━━  ━━ ━━
+    ━━━━━  ━━━━━  ━━ ━━
+    ━━━━━  ━━ ━━  ━━ ━━
+    ━━ ━━  ━━ ━━  ━━ ━━
+\n";
 
 
-fn main() -> Result<(),Box<dyn Error>> {
-    #[cfg(windows)]
-    ansi_term::enable_ansi_support().unwrap();
-    unsafe { env::set_var("COLORTERM","truecolor"); }
-    log::set_logger(&LOGGER)?;
-    log::set_max_level(LevelFilter::Trace);
-
-    #[cfg(target_os = "linux")]
-    {
-
-    }
-    #[cfg(windows)]
-    {
-
-    }
-
-    let mut lock = std::io::stdout().lock();
-    let mut rng = rand::rng();
-    let mut rndm = (&mut rng).random_iter::<(u8,u8,u8,u8)>().map(|(t,x,y,z)|{
-        if t < 51 { ' ' }
-        else if t < 102 { '░' }
-        else if t < 153 { '▒' }
-        else if t < 204 { '▓' }
-        else { '█' }
-    });
-    let map = format!("\n {}\n {}\n {}\n {}\n {}\n {}\n",
-                      rndm.by_ref().take(19).collect::<String>(),
-                      rndm.by_ref().take(19).collect::<String>(),
-                      rndm.by_ref().take(19).collect::<String>(),
-                      rndm.by_ref().take(19).collect::<String>(),
-                      rndm.by_ref().take(19).collect::<String>(),
-                      rndm.by_ref().take(19).collect::<String>());
-
-
-    let hex: &str = "
- ━━━━━  ━━━━━  ━━ ━━
- ━━ ━━  ━━━━━  ━━ ━━
- ━━━━━  ━━ ━━  ━━ ━━
- ━━━━━  ━━━━━  ━━ ━━
- ━━━━━  ━━ ━━  ━━ ━━
- ━━ ━━  ━━ ━━  ━━ ━━
-";
-    let red = format!("{}","█▓▒░".red());
-    let blue = format!("{}","█▓▒░".blue());
-    let green = format!("{}","█▓▒░".green());
-    lock.write_fmt(format_args!("{}", map))?;
-    lock.write_fmt(format_args!("{}", hex))?;
-    loop {
-        thread::sleep(Duration::from_millis(15));
-        let map = format!("\n {}\n {}\n {}\n {}\n {}\n {}\n",
-                          rndm.by_ref().take(19).collect::<String>(),
-                          rndm.by_ref().take(19).collect::<String>(),
-                          rndm.by_ref().take(19).collect::<String>(),
-                          rndm.by_ref().take(19).collect::<String>(),
-                          rndm.by_ref().take(19).collect::<String>(),
-                          rndm.by_ref().take(19).collect::<String>());
-        lock.write_fmt(format_args!("{}", map))?;
-        lock.write_fmt(format_args!("{}", hex))?;
-    }
-    Ok(())
-}
-
-#[cfg(false)]
-fn _main() -> Result<(),Box<dyn Error>>
+fn main() -> Result<(),Box<dyn Error>>
 {
+    let mut lock = std::io::stdout().lock();
+    lock.write_fmt(format_args!("{}",HEX))?;
+
     #[cfg(windows)]
     ansi_term::enable_ansi_support().unwrap();
     unsafe { env::set_var("COLORTERM","truecolor"); }
@@ -181,28 +129,45 @@ fn _main() -> Result<(),Box<dyn Error>>
 
     #[cfg(target_os = "linux")]
     {
-    #[allow(unused_imports)]
-    use platform::{linux, windows};
+        #[allow(unused_imports)]
+        use platform::{linux, windows};
 
-    let mut root = linux::util::Root::new();
-    unsafe { root.claim() };
+        let mut root = linux::util::Root::new();
+        unsafe { root.claim() };
 
-    let pid = linux::util::get_pid("kwin_wayland", true)?;
-    println!("{}",pid);
-    let tmp = unsafe { linux::vmem::VmMapping::from_pid(pid) };
-    println!("{}",tmp);
+        let pid = linux::util::get_pid("kwin_wayland", true)?;
+        println!("{}",pid);
+        let tmp = unsafe { linux::vmem::VmMapping::from_pid(pid) };
+        println!("{}",tmp);
+        println!("\n");
 
-    let map = tmp.iter()
-        .filter(|entry| {
-            if let linux::vmem::VmPath::PATH(ref path) = &entry.pathname {
-                return path.contains("libkwin");
-            }
-            return false;
-        });
-    println!("\n\n");
-    map.clone().for_each(|entry|println!("{}",entry));
+        let mut map = tmp.iter()
+            .filter(|entry| {
+                if let linux::vmem::VmPath::PATH(ref path) = &entry.pathname {
+                    if path.contains("libkwin") {
+                        println!("{}",entry);
+                        return true;
+                    }
+                }
+                return false;
+            });
+        let mem_area = map.find(|entry| {
+            entry.permissions.contains(linux::vmem::Permissions::READ | linux::vmem::Permissions::EXECUTE)
+        }).unwrap();
 
-    unsafe { root.release() };
+        let path = match mem_area.pathname {
+            linux::vmem::VmPath::PATH(ref path) => path,
+            _ => panic!() }.rsplit_once('/').unwrap().1;
+        println!("{}",path);
+        let offset: isize = linux::util::elf_offset(path, "Cursors::s_self") as isize;
+
+        let mut tracer = linux::vmem::PTrace::new(pid as i32, mem_area.address.0);
+        unsafe { tracer.seize() };
+        let data: [i64; 64] = unsafe { tracer.yoink(offset) };
+        dbg!(&data);
+
+
+        unsafe { root.release() };
     }
     #[cfg(windows)]
     {

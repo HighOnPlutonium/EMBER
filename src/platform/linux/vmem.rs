@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
+use std::{mem, ptr, slice};
 use bitflags::bitflags;
 
 
@@ -146,7 +147,7 @@ impl Debug for VmPath {
 }
 
 impl VmMapping {
-    pub(crate) unsafe fn from_pid(pid: usize) -> Self {
+    pub unsafe fn from_pid(pid: usize) -> Self {
         let mut buf = String::new();
         // require root permissions
         File::open(&format!("/proc/{}/maps", pid))
@@ -210,21 +211,79 @@ impl VmMapping {
 
 impl Deref for VmMapping {
     type Target = Vec<VmMapEntry>;
-
     fn deref(&self) -> &Self::Target {
         self.inner.as_ref()
     }
 }
 
-/*
 pub(crate) struct PTrace {
     pid: i32,
     base: *const c_void,
 }
 
 impl PTrace {
-    fn new() -> Self {
-
+    pub fn new(pid: i32, base: *const c_void) -> Self {
+        Self { pid, base }
     }
+    #[inline]
+    pub unsafe fn seize(&mut self) {
+        //todo! void* data bitmask in 4th arg of ptrace call
+        libc::ptrace(
+            libc::PTRACE_SEIZE,
+            self.pid,
+            ptr::null::<c_void>(),
+            ptr::null::<c_void>()
+        );
+    }
+    #[inline]
+    pub unsafe fn peek(&self, offset: isize) -> u16 {
+        libc::ptrace(
+            libc::PTRACE_PEEKDATA,
+            self.pid,
+            self.base.byte_offset(offset),
+            ptr::null::<c_void>()
+        ) as u16
+    }
+    #[inline]
+    pub unsafe fn poke<T>(&self, offset: isize, data: &T) {
+        libc::ptrace(
+            libc::PTRACE_POKEDATA,
+            self.pid,
+            self.base.byte_offset(offset),
+            ptr::from_ref(data)
+        );
+    }
+    #[inline]
+    pub unsafe fn peek_user(&self, offset: isize) -> u16 {
+       libc::ptrace(
+           libc::PTRACE_PEEKUSER,
+           self.pid,
+           offset,
+           ptr::null::<c_void>()
+       ) as u16
+   }
+    //todo! maybe proc macro to annotate this is giga unsafe
+    #[inline]
+    pub unsafe fn poke_user<T>(&self, offset: isize, data: &T) {
+        libc::ptrace(
+            libc::PTRACE_POKEUSER,
+            self.pid,
+            offset,
+            ptr::from_ref(data)
+        );
+    }
+
+    pub unsafe fn yoink<T>(&self, mut offset: isize) -> T {
+        let mut raw = mem::zeroed::<T>();
+        let mut slice = slice::from_raw_parts_mut(
+            ptr::from_mut(&mut raw).cast::<u16>(),
+            size_of::<T>() / size_of::<u16>());
+        slice.fill_with(|| {
+            let tmp = self.peek(offset);
+            offset += size_of::<u16>() as isize;
+            return tmp;
+        });
+        raw
+    }
+
 }
-*/
