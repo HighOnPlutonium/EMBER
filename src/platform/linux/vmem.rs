@@ -216,6 +216,9 @@ impl Deref for VmMapping {
     }
 }
 
+
+
+#[derive(Debug)]
 pub(crate) struct PTrace {
     pid: i32,
     base: *const c_void,
@@ -227,20 +230,33 @@ impl PTrace {
     }
     #[inline]
     pub unsafe fn seize(&mut self) {
-        //todo! void* data bitmask in 4th arg of ptrace call
+        let data = 0u64;
+        dbg!(&self);
         libc::ptrace(
             libc::PTRACE_SEIZE,
             self.pid,
             ptr::null::<c_void>(),
-            ptr::null::<c_void>()
+            data
         );
     }
+
+    pub unsafe fn interrupt(&self) {
+        libc::ptrace(libc::PTRACE_INTERRUPT, self.pid, 0, 0);
+    }
+    pub unsafe fn cont(&self) {
+        libc::ptrace(libc::PTRACE_CONT, self.pid, 0, 0);
+    }
+    #[inline]
+    pub unsafe fn wait(&self) {
+        libc::waitpid(self.pid, ptr::null_mut::<i32>(), 0);
+    }
+
     #[inline]
     pub unsafe fn peek(&self, offset: isize) -> u16 {
         libc::ptrace(
             libc::PTRACE_PEEKDATA,
             self.pid,
-            self.base.byte_offset(offset),
+            self.base.offset(offset),
             ptr::null::<c_void>()
         ) as u16
     }
@@ -275,7 +291,7 @@ impl PTrace {
 
     pub unsafe fn yoink<T>(&self, mut offset: isize) -> T {
         let mut raw = mem::zeroed::<T>();
-        let mut slice = slice::from_raw_parts_mut(
+        let slice = slice::from_raw_parts_mut(
             ptr::from_mut(&mut raw).cast::<u16>(),
             size_of::<T>() / size_of::<u16>());
         slice.fill_with(|| {

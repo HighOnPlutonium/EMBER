@@ -128,46 +128,64 @@ fn main() -> Result<(),Box<dyn Error>>
     log::set_max_level(LevelFilter::Trace);
 
     #[cfg(target_os = "linux")]
-    {
+    unsafe {
         #[allow(unused_imports)]
         use platform::{linux, windows};
 
         let mut root = linux::util::Root::new();
-        unsafe { root.claim() };
+        root.claim();
 
         let pid = linux::util::get_pid("kwin_wayland", true)?;
         println!("{}",pid);
-        let tmp = unsafe { linux::vmem::VmMapping::from_pid(pid) };
+        let tmp = linux::vmem::VmMapping::from_pid(pid);
         println!("{}",tmp);
         println!("\n");
 
-        let mut map = tmp.iter()
-            .filter(|entry| {
-                if let linux::vmem::VmPath::PATH(ref path) = &entry.pathname {
-                    if path.contains("libkwin") {
-                        println!("{}",entry);
-                        return true;
-                    }
-                }
-                return false;
-            });
-        let mem_area = map.find(|entry| {
-            entry.permissions.contains(linux::vmem::Permissions::READ | linux::vmem::Permissions::EXECUTE)
+        let mem_area = tmp.iter().find(|entry| {
+            if match entry.pathname {
+                linux::vmem::VmPath::PATH(ref path) => path.contains("libkwin"),
+                _ => false }
+            {
+                entry.permissions.contains(linux::vmem::Permissions::READ | linux::vmem::Permissions::EXECUTE)
+            } else { false }
         }).unwrap();
 
         let path = match mem_area.pathname {
             linux::vmem::VmPath::PATH(ref path) => path,
-            _ => panic!() }.rsplit_once('/').unwrap().1;
-        println!("{}",path);
+            _ => panic!() };
+        println!("{}",mem_area);
         let offset: isize = linux::util::elf_offset(path, "Cursors::s_self") as isize;
 
         let mut tracer = linux::vmem::PTrace::new(pid as i32, mem_area.address.0);
-        unsafe { tracer.seize() };
-        let data: [i64; 64] = unsafe { tracer.yoink(offset) };
-        dbg!(&data);
+        tracer.seize();
+
+        tracer.interrupt();
+        tracer.wait();
+        let data: [*const c_void; 12287] = tracer.yoink(offset);
+        tracer.cont();
+
+        let mut count = 0usize;
+        for addr in data {
+            if count >= 11 {
+                println!();
+                count = 0;
+            }
+            print!("  {:#018x}",addr.addr());
+            count += 1;
+        }
+        println!();
+
+        warn!("");
+        std::io::stdout().flush()?;
+        thread::sleep(Duration::from_millis(500));
+        tracer.interrupt();
+        thread::sleep(Duration::from_millis(500));
+        debug!("");
+        thread::sleep(Duration::from_millis(2500));
+        tracer.cont();
 
 
-        unsafe { root.release() };
+        root.release();
     }
     #[cfg(windows)]
     {
